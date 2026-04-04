@@ -43,13 +43,11 @@ const Ring = (() => {
     osc.stop(now + startOffset + duration);
   }
 
-  // Toca dois tons suaves — apenas uma vez
   function start() {
-    tone(1047, 0,    0.20, 0.55); // Do5
-    tone(1319, 0.18, 0.15, 0.55); // Mi5
+    tone(1047, 0,    0.20, 0.55);
+    tone(1319, 0.18, 0.15, 0.55);
   }
 
-  // Mantido por compatibilidade (nao ha mais loop para parar)
   function stop() {}
 
   return { init, start, stop };
@@ -57,7 +55,6 @@ const Ring = (() => {
 
 // ─────────────────────────────────────────────────────────────
 // RING para a CRIADORA — via <audio> com WAV gerado em JS
-// Loop contínuo enquanto há chamada entrando.
 // ─────────────────────────────────────────────────────────────
 const CriadoraRing = (() => {
   let el = null;
@@ -118,16 +115,25 @@ const CriadoraRing = (() => {
   return { start, stop };
 })();
 
-// Helpers
+// ─────────────────────────────────────────────────────────────
+// Camera: Full HD vertical 9:16 (1080x1920)
+// O browser tenta honrar o ideal; se o dispositivo nao suportar
+// entregara a resolucao maxima disponivel na mesma proporcao.
+// ─────────────────────────────────────────────────────────────
 async function getMedia() {
-  const attempts = [
-    { video: { width: 1280, height: 720, frameRate: 30, facingMode: 'user' }, audio: { echoCancellation: true, noiseSuppression: true } },
-    { video: true, audio: true }
-  ];
-  for (const c of attempts) {
-    try { return await navigator.mediaDevices.getUserMedia(c); } catch {}
-  }
-  throw new Error('Sem acesso a camera/microfone');
+  return navigator.mediaDevices.getUserMedia({
+    video: {
+      width:       { ideal: 1080 },
+      height:      { ideal: 1920 },
+      aspectRatio: { ideal: 9 / 16 },
+      frameRate:   { ideal: 30 },
+      facingMode:  'user'
+    },
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true
+    }
+  });
 }
 
 function waitForIce(pc, ms = 4000) {
@@ -190,8 +196,6 @@ if (document.body.classList.contains('page-home')) {
 
   callBtn.addEventListener('click', async () => {
     callBtn.disabled = true;
-
-    // AudioContext criado AQUI (user-gesture, antes de qualquer await)
     Ring.init();
 
     try {
@@ -205,8 +209,6 @@ if (document.body.classList.contains('page-home')) {
     localVideo.srcObject = localStream;
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
-
-    // Toca apenas uma vez ao entrar na chamada
     Ring.start();
 
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -315,7 +317,6 @@ if (document.body.classList.contains('page-criadora')) {
   let incomingCallId = null;
   let listenCh       = null;
 
-  // Pre-aquece audio no primeiro clique da pagina
   document.addEventListener('click', () => {
     const tmp = new Audio();
     tmp.play().catch(() => {});
