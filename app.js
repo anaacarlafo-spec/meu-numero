@@ -14,82 +14,57 @@ const ICE_SERVERS = [
 ];
 
 // ─────────────────────────────────────────────────────────────
-// RING — Web Audio API
-//
-// REGRA DO BROWSER: AudioContext so pode tocar apos uma
-// interacao do usuario (click/touch). Por isso:
-//
-// - Ring.init()  -> chame SINCRONAMENTE dentro do handler de click
-//                  (cria e resume o AudioContext nesse momento)
-// - Ring.start() -> chame depois (pode ser async, contexto ja esta ativo)
-// - Ring.stop()  -> para o loop
+// RING — Web Audio API (cliente)
+// Toca UMA VEZ ao entrar na chamada. Sem loop.
+// Ring.init() deve ser chamado SINCRONAMENTE no click handler.
 // ─────────────────────────────────────────────────────────────
 const Ring = (() => {
-  let ctx       = null;
-  let loopTimer = null;
-  let active    = false;
+  let ctx = null;
 
-  // Cria e desbloqueia o AudioContext SINCRONAMENTE no click
   function init() {
     if (ctx) return;
     ctx = new (window.AudioContext || window.webkitAudioContext)();
-    // resume() deve ser chamado dentro de um user-gesture handler
     if (ctx.state === 'suspended') ctx.resume();
   }
 
-  // Dois tons de sino suaves com envelope
-  function beep() {
+  function tone(freq, startOffset, peakVol, duration) {
     if (!ctx || ctx.state !== 'running') return;
     const now = ctx.currentTime;
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, now + startOffset);
+    gain.gain.linearRampToValueAtTime(peakVol, now + startOffset + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + duration);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now + startOffset);
+    osc.stop(now + startOffset + duration);
+  }
 
-    function tone(freq, startOffset, peakVol, duration) {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0, now + startOffset);
-      gain.gain.linearRampToValueAtTime(peakVol, now + startOffset + 0.05);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + duration);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now + startOffset);
-      osc.stop(now + startOffset + duration);
-    }
-
+  // Toca dois tons suaves — apenas uma vez
+  function start() {
     tone(1047, 0,    0.20, 0.55); // Do5
     tone(1319, 0.18, 0.15, 0.55); // Mi5
   }
 
-  function start() {
-    if (active) return;
-    active = true;
-    beep();
-    loopTimer = setInterval(beep, 3200);
-  }
-
-  function stop() {
-    active = false;
-    clearInterval(loopTimer);
-    loopTimer = null;
-  }
+  // Mantido por compatibilidade (nao ha mais loop para parar)
+  function stop() {}
 
   return { init, start, stop };
 })();
 
 // ─────────────────────────────────────────────────────────────
-// RING para a CRIADORA — via <audio> tag com data URI
-// O <audio> pode tocar via .play() desde que a pagina tenha
-// tido qualquer interacao antes (ex: login, clique nos botoes).
+// RING para a CRIADORA — via <audio> com WAV gerado em JS
+// Loop contínuo enquanto há chamada entrando.
 // ─────────────────────────────────────────────────────────────
 const CriadoraRing = (() => {
   let el = null;
 
-  // Gera o audio element com um beep suave em base64 (WAV 1s, 440Hz)
-  // para nao depender de arquivo externo
   function getEl() {
     if (el) return el;
 
-    // WAV minimo de 440Hz gerado em JS puro
     const sampleRate = 44100;
     const duration   = 0.8;
     const freq       = 880;
@@ -105,8 +80,8 @@ const CriadoraRing = (() => {
     writeStr(8,  'WAVE');
     writeStr(12, 'fmt ');
     view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);            // PCM
-    view.setUint16(22, 1, true);            // mono
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
     view.setUint32(24, sampleRate, true);
     view.setUint32(28, sampleRate * 2, true);
     view.setUint16(32, 2, true);
@@ -115,18 +90,16 @@ const CriadoraRing = (() => {
     view.setUint32(40, numSamples * 2, true);
 
     for (let i = 0; i < numSamples; i++) {
-      // envelope: fade in 10%, sustain, fade out 30%
-      const t         = i / sampleRate;
-      const fadeIn    = Math.min(1, t / (duration * 0.10));
-      const fadeOut   = Math.max(0, 1 - (t - duration * 0.7) / (duration * 0.3));
-      const envelope  = fadeIn * fadeOut;
-      const sample    = Math.sin(2 * Math.PI * freq * t) * envelope * 0.25;
+      const t        = i / sampleRate;
+      const fadeIn   = Math.min(1, t / (duration * 0.10));
+      const fadeOut  = Math.max(0, 1 - (t - duration * 0.7) / (duration * 0.3));
+      const envelope = fadeIn * fadeOut;
+      const sample   = Math.sin(2 * Math.PI * freq * t) * envelope * 0.25;
       view.setInt16(44 + i * 2, Math.max(-32767, Math.min(32767, sample * 32767)), true);
     }
 
     const blob = new Blob([buffer], { type: 'audio/wav' });
-    const url  = URL.createObjectURL(blob);
-    el = new Audio(url);
+    el = new Audio(URL.createObjectURL(blob));
     el.loop   = true;
     el.volume = 0.35;
     return el;
@@ -215,12 +188,10 @@ if (document.body.classList.contains('page-home')) {
       p => applyStatus(p.new.status))
     .subscribe();
 
-  // IMPORTANTE: callBtn.addEventListener deve ser SINCRONO no inicio
-  // para que Ring.init() crie o AudioContext dentro do user-gesture
   callBtn.addEventListener('click', async () => {
     callBtn.disabled = true;
 
-    // Cria AudioContext AGORA (ainda no user-gesture, antes de qualquer await)
+    // AudioContext criado AQUI (user-gesture, antes de qualquer await)
     Ring.init();
 
     try {
@@ -234,6 +205,8 @@ if (document.body.classList.contains('page-home')) {
     localVideo.srcObject = localStream;
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
+
+    // Toca apenas uma vez ao entrar na chamada
     Ring.start();
 
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -241,19 +214,14 @@ if (document.body.classList.contains('page-home')) {
 
     pc.ontrack = e => {
       if (e.streams && e.streams[0]) {
-        Ring.stop();
         remoteVideo.srcObject = e.streams[0];
         callStatusMsg.textContent = 'Chamada em andamento';
       }
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') {
-        Ring.stop();
-        callStatusMsg.textContent = 'Chamada em andamento';
-      }
+      if (pc.connectionState === 'connected') callStatusMsg.textContent = 'Chamada em andamento';
       if (pc.connectionState === 'failed') {
-        Ring.stop();
         callStatusMsg.textContent = 'Falha na conexao. Tente novamente.';
         setTimeout(endCall, 3000);
       }
@@ -268,7 +236,6 @@ if (document.body.classList.contains('page-home')) {
       .select('id').single();
 
     if (error || !row) {
-      Ring.stop();
       alert('Erro ao iniciar chamada. Tente novamente.');
       endCall();
       return;
@@ -283,28 +250,24 @@ if (document.body.classList.contains('page-home')) {
         if (r.status === 'active' && r.answer && pc.signalingState === 'have-local-offer') {
           try {
             await pc.setRemoteDescription({ type: 'answer', sdp: r.answer });
-            Ring.stop();
             callStatusMsg.textContent = 'Conectando video...';
           } catch (e) { console.error('setRemoteDescription:', e); }
         }
         if (r.status === 'rejected') {
-          Ring.stop();
           callStatusMsg.textContent = 'Chamada nao atendida.';
           setTimeout(endCall, 2000);
         }
-        if (r.status === 'ended') { Ring.stop(); endCall(); }
+        if (r.status === 'ended') endCall();
       })
       .subscribe();
   });
 
   endCallBtn.addEventListener('click', async () => {
-    Ring.stop();
     if (callId) await sb.from('sinalizacao').update({ status: 'ended' }).eq('id', callId);
     endCall();
   });
 
   function endCall() {
-    Ring.stop();
     if (realtimeCh) { sb.removeChannel(realtimeCh); realtimeCh = null; }
     if (pc)          { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
@@ -352,12 +315,8 @@ if (document.body.classList.contains('page-criadora')) {
   let incomingCallId = null;
   let listenCh       = null;
 
-  // Pre-aquece o audio ao primeiro clique em qualquer botao da pagina
-  // Isso garante que CriadoraRing.start() funcione mesmo vindo do Realtime
-  let audioWarmedUp = false;
+  // Pre-aquece audio no primeiro clique da pagina
   document.addEventListener('click', () => {
-    if (audioWarmedUp) return;
-    audioWarmedUp = true;
     const tmp = new Audio();
     tmp.play().catch(() => {});
   }, { once: true });
