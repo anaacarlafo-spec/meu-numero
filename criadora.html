@@ -11,9 +11,6 @@
 </head>
 <body class="page-criadora">
 
-  <meta name="supabase-url"  content="__SUPABASE_URL__">
-  <meta name="supabase-key" content="__SUPABASE_ANON_KEY__">
-
   <!-- Login -->
   <div id="loginScreen" class="auth-screen">
     <div class="auth-card">
@@ -36,7 +33,10 @@
   <div id="dashboardScreen" class="dashboard hidden">
     <header class="dash-header">
       <span class="dash-logo">Meu Número</span>
-      <button id="logoutBtn" class="btn-ghost" aria-label="Sair da conta">Sair</button>
+      <div class="dash-header-actions">
+        <a href="index.html" class="btn-ghost" target="_blank" rel="noopener noreferrer" aria-label="Ver página pública">Ver minha página</a>
+        <button id="logoutBtn" class="btn-ghost" aria-label="Sair da conta">Sair</button>
+      </div>
     </header>
 
     <main class="dash-main">
