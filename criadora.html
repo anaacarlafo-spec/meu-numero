@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Painel da Criadora — Meu Número</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="page-criadora">
+
+  <!-- Login -->
+  <div id="loginScreen" class="auth-screen">
+    <div class="auth-card">
+      <h1 class="auth-title">Meu Número</h1>
+      <p class="auth-subtitle">Área da criadora</p>
+      <form id="loginForm" class="auth-form" novalidate>
+        <label for="loginEmail" class="form-label">E-mail</label>
+        <input type="email" id="loginEmail" class="form-input" placeholder="seu@email.com" required autocomplete="email">
+
+        <label for="loginPassword" class="form-label">Senha</label>
+        <input type="password" id="loginPassword" class="form-input" placeholder="••••••••" required autocomplete="current-password">
+
+        <p id="loginError" class="form-error hidden" role="alert"></p>
+
+        <button type="submit" class="btn-primary">Entrar</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Painel -->
+  <div id="dashboardScreen" class="dashboard hidden">
+    <header class="dash-header">
+      <span class="dash-logo">Meu Número</span>
+      <button id="logoutBtn" class="btn-ghost" aria-label="Sair da conta">Sair</button>
+    </header>
+
+    <main class="dash-main">
+      <section class="dash-section">
+        <h2 class="dash-section-title">Sua disponibilidade</h2>
+        <div class="status-toggle">
+          <button id="btnOnline"  class="btn-status" data-status="online"  aria-pressed="false">Online</button>
+          <button id="btnOffline" class="btn-status active" data-status="offline" aria-pressed="true">Offline</button>
+        </div>
+        <p id="statusFeedback" class="status-feedback">Você está offline.</p>
+      </section>
+
+      <section class="dash-section">
+        <h2 class="dash-section-title">Sua foto</h2>
+        <div class="photo-edit">
+          <img id="dashPhoto" src="https://picsum.photos/seed/criadora/200/200" alt="Foto atual da criadora" width="120" height="120" class="dash-photo">
+          <div class="photo-actions">
+            <label for="photoInput" class="btn-secondary" role="button" tabindex="0">
+              Alterar foto
+              <input type="file" id="photoInput" accept="image/*" class="sr-only" aria-label="Selecionar nova foto">
+            </label>
+            <p class="photo-hint">Formatos aceitos: JPG, PNG, WebP</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="dash-section">
+        <h2 class="dash-section-title">Seu nome</h2>
+        <div class="name-edit">
+          <input type="text" id="nameInput" class="form-input" placeholder="Seu nome" maxlength="40" aria-label="Nome exibido na página pública">
+          <button id="saveNameBtn" class="btn-primary">Salvar nome</button>
+        </div>
+        <p id="nameFeedback" class="status-feedback hidden"></p>
+      </section>
+
+      <!-- Área de chamada recebida -->
+      <section id="incomingSection" class="dash-section incoming-section hidden">
+        <h2 class="dash-section-title">Chamada recebida</h2>
+        <p class="incoming-msg">Um cliente está ligando para você!</p>
+        <div class="incoming-actions">
+          <button id="acceptCallBtn" class="btn-primary">Atender</button>
+          <button id="rejectCallBtn" class="btn-ghost">Recusar</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Tela de chamada -->
+  <div id="callScreen" class="call-screen hidden" role="dialog" aria-modal="true" aria-label="Videochamada em andamento">
+    <div class="call-videos">
+      <video id="remoteVideo" autoplay playsinline class="video-remote" aria-label="Vídeo do cliente"></video>
+      <video id="localVideo"  autoplay playsinline muted class="video-local"  aria-label="Seu vídeo"></video>
+    </div>
+    <div class="call-controls">
+      <button id="endCallBtn" class="btn-end-call" aria-label="Encerrar chamada">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+          <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.42 19.42 0 0 1 4.26 9.6a19.79 19.79 0 0 1-3.07-8.68A2 2 0 0 1 3.17 0h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L7.17 7.91"/>
+          <line x1="23" y1="1" x2="1" y2="23"/>
+        </svg>
+        Encerrar
+      </button>
+    </div>
+    <p id="callStatus" class="call-status-msg">Chamada em andamento</p>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
