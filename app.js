@@ -13,10 +13,77 @@ const ICE_SERVERS = [
   { urls: 'stun:stun3.l.google.com:19302' }
 ];
 
-// Aguarda ms milissegundos
+// ─────────────────────────────────────────────
+// RING — gerado via Web Audio API (sem arquivo)
+// Toca para o cliente enquanto aguarda.
+// Toca para a criadora quando recebe chamada.
+// ─────────────────────────────────────────────
+const Ring = (() => {
+  let ctx = null;
+  let gainNode = null;
+  let loopTimer = null;
+  let playing = false;
+
+  function getCtx() {
+    if (!ctx) {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+      gainNode = ctx.createGain();
+      gainNode.gain.value = 0.18; // volume suave
+      gainNode.connect(ctx.destination);
+    }
+    return ctx;
+  }
+
+  // Toca um sino suave: dois tons (1200 Hz + 1500 Hz) com envelope
+  function beep() {
+    const c = getCtx();
+    const now = c.currentTime;
+
+    // Nota 1
+    const o1 = c.createOscillator();
+    const g1 = c.createGain();
+    o1.type = 'sine';
+    o1.frequency.value = 1200;
+    g1.gain.setValueAtTime(0, now);
+    g1.gain.linearRampToValueAtTime(0.18, now + 0.04);
+    g1.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+    o1.connect(g1); g1.connect(ctx.destination);
+    o1.start(now); o1.stop(now + 0.5);
+
+    // Nota 2 (ligeiramente depois)
+    const o2 = c.createOscillator();
+    const g2 = c.createGain();
+    o2.type = 'sine';
+    o2.frequency.value = 1500;
+    g2.gain.setValueAtTime(0, now + 0.12);
+    g2.gain.linearRampToValueAtTime(0.13, now + 0.18);
+    g2.gain.exponentialRampToValueAtTime(0.001, now + 0.65);
+    o2.connect(g2); g2.connect(ctx.destination);
+    o2.start(now + 0.12); o2.stop(now + 0.65);
+  }
+
+  function start() {
+    if (playing) return;
+    playing = true;
+    // Precisa resumir o contexto (politica de autoplay dos browsers)
+    getCtx();
+    if (ctx.state === 'suspended') ctx.resume();
+    beep();
+    loopTimer = setInterval(beep, 3000); // repete a cada 3s
+  }
+
+  function stop() {
+    playing = false;
+    clearInterval(loopTimer);
+    loopTimer = null;
+  }
+
+  return { start, stop };
+})();
+
+// Helpers
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Pega midia do usuario com fallback progressivo
 async function getMedia() {
   const attempts = [
     { video: { width: 1280, height: 720, frameRate: 30, facingMode: 'user' }, audio: { echoCancellation: true, noiseSuppression: true } },
@@ -28,7 +95,6 @@ async function getMedia() {
   throw new Error('Nao foi possivel acessar camera/microfone');
 }
 
-// Aguarda ICE gathering terminar (max ms)
 function waitForIce(pc, ms = 4000) {
   return new Promise(resolve => {
     if (pc.iceGatheringState === 'complete') { resolve(); return; }
@@ -61,7 +127,6 @@ if (document.body.classList.contains('page-home')) {
   let callId      = null;
   let realtimeCh  = null;
 
-  // --- Carrega perfil da criadora ---
   async function loadPerfil() {
     const { data } = await sb.from('perfil').select('nome,foto_url,status').eq('id',1).single();
     if (!data) return;
@@ -83,17 +148,14 @@ if (document.body.classList.contains('page-home')) {
 
   loadPerfil();
 
-  // Escuta mudanca de status da criadora em tempo real
   sb.channel('perfil-public')
     .on('postgres_changes', { event:'UPDATE', schema:'public', table:'perfil', filter:'id=eq.1' },
       p => applyStatus(p.new.status))
     .subscribe();
 
-  // --- Botao Ligar ---
   callBtn.addEventListener('click', async () => {
     callBtn.disabled = true;
 
-    // 1. Pega midia local
     try {
       localStream = await getMedia();
     } catch {
@@ -106,75 +168,81 @@ if (document.body.classList.contains('page-home')) {
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
 
-    // 2. Cria PeerConnection
+    // Inicia ring para o cliente
+    Ring.start();
+
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
     pc.ontrack = e => {
       if (e.streams && e.streams[0]) {
         remoteVideo.srcObject = e.streams[0];
+        Ring.stop(); // para o ring quando video remoto chegar
         callStatusMsg.textContent = 'Chamada em andamento';
       }
     };
 
     pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'connected') {
+        Ring.stop();
+        callStatusMsg.textContent = 'Chamada em andamento';
+      }
       if (pc.connectionState === 'failed') {
+        Ring.stop();
         callStatusMsg.textContent = 'Falha na conexao. Tente novamente.';
         setTimeout(endCall, 3000);
       }
     };
 
-    // 3. Cria offer COMPLETA (aguarda ICE antes de salvar)
     const offer = await pc.createOffer({ offerToReceiveAudio:true, offerToReceiveVideo:true });
     await pc.setLocalDescription(offer);
-    await waitForIce(pc); // espera todos ICE candidates serem coletados
+    await waitForIce(pc);
 
-    // 4. Insere na tabela com offer JA completa (SDP ja tem candidates embutidos)
     const { data: row, error } = await sb.from('sinalizacao')
-      .insert({
-        role:   'client',
-        status: 'calling',
-        offer:  pc.localDescription.sdp   // SDP completo com ICE candidates
-      })
+      .insert({ role: 'client', status: 'calling', offer: pc.localDescription.sdp })
       .select('id').single();
 
     if (error || !row) {
+      Ring.stop();
       alert('Erro ao iniciar chamada. Tente novamente.');
       endCall();
       return;
     }
     callId = row.id;
 
-    // 5. Escuta UPDATE nessa linha esperando a resposta da criadora
     realtimeCh = sb.channel('client-sig-' + callId)
       .on('postgres_changes', {
         event:'UPDATE', schema:'public', table:'sinalizacao', filter:`id=eq.${callId}`
       }, async p => {
         const r = p.new;
-
         if (r.status === 'active' && r.answer && pc.signalingState === 'have-local-offer') {
-          // Criadora aceitou — aplica answer
           try {
             await pc.setRemoteDescription({ type:'answer', sdp: r.answer });
+            Ring.stop();
             callStatusMsg.textContent = 'Conectando video...';
           } catch(e) { console.error('setRemoteDescription:', e); }
         }
-
         if (r.status === 'rejected') {
+          Ring.stop();
           callStatusMsg.textContent = 'Chamada nao atendida.';
           setTimeout(endCall, 2000);
         }
-        if (r.status === 'ended') endCall();
+        if (r.status === 'ended') {
+          Ring.stop();
+          endCall();
+        }
       })
       .subscribe();
   });
 
   endCallBtn.addEventListener('click', async () => {
+    Ring.stop();
     if (callId) await sb.from('sinalizacao').update({ status:'ended' }).eq('id', callId);
     endCall();
   });
 
   function endCall() {
+    Ring.stop();
     if (realtimeCh) { sb.removeChannel(realtimeCh); realtimeCh = null; }
     if (pc)          { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
@@ -222,7 +290,6 @@ if (document.body.classList.contains('page-criadora')) {
   let incomingCallId = null;
   let listenCh       = null;
 
-  // --- Auth ---
   async function init() {
     const { data: { session } } = await sb.auth.getSession();
     if (session) showDashboard();
@@ -292,7 +359,6 @@ if (document.body.classList.contains('page-criadora')) {
   btnOnline.addEventListener('click',  () => setStatus('online'));
   btnOffline.addEventListener('click', () => setStatus('offline'));
 
-  // Upload de foto
   photoInput.addEventListener('change', async e => {
     const file = e.target.files[0];
     if (!file) return;
@@ -306,7 +372,6 @@ if (document.body.classList.contains('page-criadora')) {
     dashPhoto.src = url + '?t=' + Date.now();
   });
 
-  // Salvar nome
   saveNameBtn.addEventListener('click', async () => {
     const nome = nameInput.value.trim();
     if (!nome) return;
@@ -316,33 +381,28 @@ if (document.body.classList.contains('page-criadora')) {
     setTimeout(() => nameFeedback.classList.add('hidden'), 2000);
   });
 
-  // --- Escuta chamadas entrantes ---
-  // O Supabase Realtime NAO suporta filtro em INSERT.
-  // Solucao: escuta todos os INSERTs e filtra por status='calling' no JS.
   function startListening() {
-    if (listenCh) { sb.removeChannel(listenCh); }
-
+    if (listenCh) sb.removeChannel(listenCh);
     listenCh = sb.channel('criadora-incoming')
       .on('postgres_changes', {
         event: 'INSERT', schema: 'public', table: 'sinalizacao'
       }, payload => {
         const row = payload.new;
         if (row.status === 'calling' && row.offer) {
-          // Ja tem offer — pode exibir para a criadora atender
           incomingCallId = row.id;
           incomingSection.classList.remove('hidden');
+          Ring.start(); // toca ring para a criadora
         }
       })
       .subscribe();
   }
 
-  // --- Aceitar chamada ---
   acceptCallBtn.addEventListener('click', async () => {
+    Ring.stop(); // para o ring ao atender
     incomingSection.classList.add('hidden');
     callId = incomingCallId;
     incomingCallId = null;
 
-    // 1. Pega midia da criadora
     try {
       localStream = await getMedia();
     } catch {
@@ -356,7 +416,6 @@ if (document.body.classList.contains('page-criadora')) {
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Conectando...';
 
-    // 2. Busca a offer do cliente (ja deve estar salva no INSERT)
     const { data: row } = await sb.from('sinalizacao')
       .select('offer')
       .eq('id', callId)
@@ -369,7 +428,6 @@ if (document.body.classList.contains('page-criadora')) {
       return;
     }
 
-    // 3. Cria PeerConnection da criadora
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
@@ -388,23 +446,19 @@ if (document.body.classList.contains('page-criadora')) {
       }
     };
 
-    // 4. Aplica offer do cliente (SDP completo com ICE embutidos)
     await pc.setRemoteDescription({ type: 'offer', sdp: row.offer });
 
-    // 5. Cria answer COMPLETA (aguarda ICE)
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    await waitForIce(pc); // espera todos ICE candidates serem coletados
+    await waitForIce(pc);
 
-    // 6. Salva answer no banco e marca como active
     await sb.from('sinalizacao').update({
-      answer: pc.localDescription.sdp,  // SDP completo com ICE candidates da criadora
+      answer: pc.localDescription.sdp,
       status: 'active'
     }).eq('id', callId);
 
     callStatusMsg.textContent = 'Chamada em andamento';
 
-    // 7. Escuta se o cliente encerrou
     realtimeCh = sb.channel('criadora-sig-' + callId)
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
@@ -414,8 +468,8 @@ if (document.body.classList.contains('page-criadora')) {
       .subscribe();
   });
 
-  // --- Rejeitar chamada ---
   rejectCallBtn.addEventListener('click', async () => {
+    Ring.stop();
     incomingSection.classList.add('hidden');
     if (incomingCallId) {
       await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', incomingCallId);
@@ -423,13 +477,13 @@ if (document.body.classList.contains('page-criadora')) {
     }
   });
 
-  // --- Encerrar chamada ---
   endCallBtn.addEventListener('click', async () => {
     if (callId) await sb.from('sinalizacao').update({ status: 'ended' }).eq('id', callId);
     endCall();
   });
 
   function endCall() {
+    Ring.stop();
     if (realtimeCh) { sb.removeChannel(realtimeCh); realtimeCh = null; }
     if (pc)          { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
