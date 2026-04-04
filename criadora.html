@@ -11,6 +11,9 @@
 </head>
 <body class="page-criadora">
 
+  <meta name="supabase-url"  content="__SUPABASE_URL__">
+  <meta name="supabase-key" content="__SUPABASE_ANON_KEY__">
+
   <!-- Login -->
   <div id="loginScreen" class="auth-screen">
     <div class="auth-card">
@@ -24,8 +27,7 @@
         <input type="password" id="loginPassword" class="form-input" placeholder="••••••••" required autocomplete="current-password">
 
         <p id="loginError" class="form-error hidden" role="alert"></p>
-
-        <button type="submit" class="btn-primary">Entrar</button>
+        <button type="submit" class="btn-primary" id="loginBtn">Entrar</button>
       </form>
     </div>
   </div>
@@ -38,6 +40,7 @@
     </header>
 
     <main class="dash-main">
+
       <section class="dash-section">
         <h2 class="dash-section-title">Sua disponibilidade</h2>
         <div class="status-toggle">
@@ -50,13 +53,13 @@
       <section class="dash-section">
         <h2 class="dash-section-title">Sua foto</h2>
         <div class="photo-edit">
-          <img id="dashPhoto" src="https://picsum.photos/seed/criadora/200/200" alt="Foto atual da criadora" width="120" height="120" class="dash-photo">
+          <img id="dashPhoto" src="https://picsum.photos/seed/criadora/200/200" alt="Foto atual da criadora" width="80" height="80" class="dash-photo">
           <div class="photo-actions">
             <label for="photoInput" class="btn-secondary" role="button" tabindex="0">
               Alterar foto
               <input type="file" id="photoInput" accept="image/*" class="sr-only" aria-label="Selecionar nova foto">
             </label>
-            <p class="photo-hint">Formatos aceitos: JPG, PNG, WebP</p>
+            <p class="photo-hint">JPG, PNG ou WebP</p>
           </div>
         </div>
       </section>
@@ -64,21 +67,22 @@
       <section class="dash-section">
         <h2 class="dash-section-title">Seu nome</h2>
         <div class="name-edit">
-          <input type="text" id="nameInput" class="form-input" placeholder="Seu nome" maxlength="40" aria-label="Nome exibido na página pública">
-          <button id="saveNameBtn" class="btn-primary">Salvar nome</button>
+          <input type="text" id="nameInput" class="form-input" placeholder="Seu nome público" maxlength="40" aria-label="Nome exibido na página pública">
+          <button id="saveNameBtn" class="btn-primary">Salvar</button>
         </div>
         <p id="nameFeedback" class="status-feedback hidden"></p>
       </section>
 
-      <!-- Área de chamada recebida -->
+      <!-- Chamada recebida -->
       <section id="incomingSection" class="dash-section incoming-section hidden">
-        <h2 class="dash-section-title">Chamada recebida</h2>
+        <h2 class="dash-section-title">📞 Chamada recebida</h2>
         <p class="incoming-msg">Um cliente está ligando para você!</p>
         <div class="incoming-actions">
           <button id="acceptCallBtn" class="btn-primary">Atender</button>
-          <button id="rejectCallBtn" class="btn-ghost">Recusar</button>
+          <button id="rejectCallBtn" class="btn-ghost-border">Recusar</button>
         </div>
       </section>
+
     </main>
   </div>
 
@@ -90,16 +94,14 @@
     </div>
     <div class="call-controls">
       <button id="endCallBtn" class="btn-end-call" aria-label="Encerrar chamada">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
-          <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.42 19.42 0 0 1 4.26 9.6a19.79 19.79 0 0 1-3.07-8.68A2 2 0 0 1 3.17 0h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L7.17 7.91"/>
-          <line x1="23" y1="1" x2="1" y2="23"/>
-        </svg>
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.42 19.42 0 0 1 4.26 9.6a19.79 19.79 0 0 1-3.07-8.68A2 2 0 0 1 3.17 0h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L7.17 7.91"/><line x1="23" y1="1" x2="1" y2="23"/></svg>
         Encerrar
       </button>
     </div>
-    <p id="callStatus" class="call-status-msg">Chamada em andamento</p>
+    <p id="callStatusMsg" class="call-status-msg">Chamada em andamento</p>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

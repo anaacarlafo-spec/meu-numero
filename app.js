@@ -1,35 +1,49 @@
 /**
  * app.js — Meu Número V1
- * Gerencia: status da criadora (via localStorage compartilhado simulado),
- * WebRTC signaling via BroadcastChannel (mesmo dispositivo / demo),
- * e controles da área da criadora.
  *
- * Nota: Para produção multidevice, substituir BroadcastChannel por
- * Supabase Realtime (websocket) como canal de sinalização WebRTC.
+ * Supabase é usado para:
+ *   1. Autenticação real da criadora (Supabase Auth)
+ *   2. Perfil da criadora: nome, foto, status (tabela `perfil`)
+ *   3. Sinalização WebRTC multidevice (tabela `sinalizacao` + Realtime)
+ *
+ * WebRTC faz a chamada de vídeo peer-to-peer diretamente entre os navegadores.
  */
 
 'use strict';
 
-// ── Credenciais demo da criadora (hardcoded para V1 sem backend) ──
-const DEMO_EMAIL    = 'criadora@meunumero.com';
-const DEMO_PASSWORD = 'meunumero2025';
-
-// ── Chave de estado compartilhado (sessionStorage — demo no mesmo browser) ──
-const KEY_STATUS = 'mn_status';   // 'online' | 'offline'
-const KEY_NAME   = 'mn_name';
-const KEY_PHOTO  = 'mn_photo';
-
-function getState(key, def) {
-  try { return sessionStorage.getItem(key) || def; } catch { return def; }
-}
-function setState(key, val) {
-  try { sessionStorage.setItem(key, val); } catch {}
+// ── Lê config do Supabase injetada no HTML via meta tags (valores substituídos pelo Vercel) ──
+function getMeta(name) {
+  const el = document.querySelector(`meta[name="${name}"]`);
+  return el ? el.getAttribute('content') : '';
 }
 
-// ════════════════════════════════════════════
-// HOME PAGE
-// ════════════════════════════════════════════
+const SUPABASE_URL  = getMeta('supabase-url');
+const SUPABASE_KEY  = getMeta('supabase-key');
+
+if (!SUPABASE_URL || SUPABASE_URL === '__SUPABASE_URL__') {
+  document.body.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;min-height:100dvh;background:#0a0a0a;">
+      <div style="text-align:center;color:#C9A84C;font-family:Inter,sans-serif;padding:2rem;">
+        <h2 style="font-family:'Cormorant Garamond',serif;font-size:1.8rem;margin-bottom:1rem;">Configuração pendente</h2>
+        <p style="color:rgba(201,168,76,0.65);max-width:40ch;margin:0 auto;">
+          As variáveis de ambiente do Supabase ainda não foram preenchidas no Vercel.<br><br>
+          Acesse <strong>Vercel → meu-numero → Settings → Environment Variables</strong> e adicione <code>SUPABASE_URL</code> e <code>SUPABASE_ANON_KEY</code>.
+        </p>
+      </div>
+    </div>`;
+  throw new Error('Supabase não configurado.');
+}
+
+const { createClient } = supabase;
+const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
+
+// ══════════════════════════════════════════════════════════════
+// HOME — página pública da criadora
+// ══════════════════════════════════════════════════════════════
 if (document.body.classList.contains('page-home')) {
+
   const creatorPhoto  = document.getElementById('creatorPhoto');
   const creatorName   = document.getElementById('creatorName');
   const statusDot     = document.getElementById('statusDot');
@@ -40,283 +54,334 @@ if (document.body.classList.contains('page-home')) {
   const localVideo    = document.getElementById('localVideo');
   const remoteVideo   = document.getElementById('remoteVideo');
   const endCallBtn    = document.getElementById('endCallBtn');
-  const callStatusMsg = document.getElementById('callStatus');
+  const callStatusMsg = document.getElementById('callStatusMsg');
 
   let localStream = null;
   let pc = null;
+  let callId = null;
+  let sigChannel = null;
 
-  // Canal de sinalização (mesmo browser, demo)
-  const channel = new BroadcastChannel('mn_signaling');
-
-  function refreshHome() {
-    const status = getState(KEY_STATUS, 'offline');
-    const name   = getState(KEY_NAME,   'Ana Carla');
-    const photo  = getState(KEY_PHOTO,  '');
-
-    creatorName.textContent = name;
-    if (photo) creatorPhoto.src = photo;
-
-    const isOnline = status === 'online';
-    statusDot.className   = 'status-dot ' + status;
-    statusLabel.className = 'status-label ' + (isOnline ? 'online-text' : 'offline-text');
-    statusLabel.textContent = isOnline ? 'Online agora' : 'Offline agora';
-    callBtn.disabled = !isOnline;
-    callHint.textContent = isOnline
-      ? 'Clique para iniciar a videochamada.'
-      : 'A criadora está offline no momento.';
+  // Carrega perfil da criadora
+  async function loadPerfil() {
+    const { data } = await sb.from('perfil').select('nome, foto_url, status').eq('id', 1).single();
+    if (!data) return;
+    creatorName.textContent = data.nome || 'Criadora';
+    if (data.foto_url) creatorPhoto.src = data.foto_url;
+    applyStatus(data.status);
   }
 
-  refreshHome();
+  function applyStatus(status) {
+    const online = status === 'online';
+    statusDot.className   = 'status-dot ' + (online ? 'online' : 'offline');
+    statusLabel.className = 'status-label ' + (online ? 'online-text' : 'offline-text');
+    statusLabel.textContent = online ? 'Online agora' : 'Offline agora';
+    callBtn.disabled = !online;
+    callHint.textContent = online ? 'Clique para iniciar a videochamada.' : 'A criadora está offline no momento.';
+  }
 
-  // Atualiza quando criadora muda status (mesmo browser)
-  window.addEventListener('storage', refreshHome);
-  channel.addEventListener('message', (e) => {
-    if (e.data.type === 'STATUS_CHANGED') refreshHome();
-    if (e.data.type === 'CALL_ACCEPTED')  onCallAccepted(e.data.answer);
-    if (e.data.type === 'CALL_ENDED')     endCall();
-  });
+  loadPerfil();
 
+  // Escuta mudanças de status em tempo real
+  sb.channel('perfil-status')
+    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'perfil', filter: 'id=eq.1' },
+      (payload) => applyStatus(payload.new.status)
+    ).subscribe();
+
+  // ── Iniciar chamada ──
   callBtn.addEventListener('click', async () => {
     try {
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localVideo.srcObject = localStream;
-      openCallScreen('Aguardando a criadora atender...');
-      await startPeerConnection(true);
-    } catch (err) {
-      if (err.name === 'NotAllowedError') {
-        alert('Para ligar, você precisa autorizar o acesso à câmera e ao microfone.');
-      } else {
-        alert('Não foi possível acessar câmera/microfone. Verifique seus dispositivos.');
-      }
+    } catch {
+      alert('Para ligar, autorize o acesso à câmera e ao microfone no seu navegador.');
+      return;
     }
+    localVideo.srcObject = localStream;
+    callScreen.classList.remove('hidden');
+    callStatusMsg.textContent = 'Aguardando a criadora atender...';
+
+    // Cria registro de sinalização no Supabase
+    const { data: row } = await sb.from('sinalizacao').insert({ role: 'client', status: 'calling' }).select().single();
+    callId = row.id;
+
+    pc = buildPC();
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await sb.from('sinalizacao').update({ offer: JSON.stringify(offer) }).eq('id', callId);
+
+    // Escuta resposta da criadora
+    sigChannel = sb.channel('sig-client-' + callId)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}` },
+        async (payload) => {
+          const row = payload.new;
+          if (row.answer && pc.signalingState !== 'stable') {
+            await pc.setRemoteDescription(JSON.parse(row.answer));
+            callStatusMsg.textContent = 'Chamada em andamento';
+          }
+          if (row.ice_criadora) {
+            const candidates = JSON.parse(row.ice_criadora);
+            for (const c of candidates) { try { await pc.addIceCandidate(c); } catch {} }
+          }
+          if (row.status === 'rejected') {
+            callStatusMsg.textContent = 'Chamada não atendida.';
+            setTimeout(endCall, 2000);
+          }
+          if (row.status === 'ended') endCall();
+        }
+      ).subscribe();
   });
 
-  endCallBtn.addEventListener('click', () => {
-    channel.postMessage({ type: 'CALL_ENDED' });
+  endCallBtn.addEventListener('click', async () => {
+    if (callId) await sb.from('sinalizacao').update({ status: 'ended' }).eq('id', callId);
     endCall();
   });
 
-  async function startPeerConnection(isInitiator) {
-    pc = createPC();
-    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-
-    if (isInitiator) {
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      channel.postMessage({ type: 'CALL_REQUEST', offer });
-    }
-  }
-
-  function onCallAccepted(answer) {
-    if (!pc) return;
-    pc.setRemoteDescription(new RTCSessionDescription(answer));
-    callStatusMsg.textContent = 'Chamada em andamento';
-  }
-
-  function createPC() {
-    const p = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  function buildPC() {
+    const p = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const iceBuf = [];
     p.onicecandidate = (e) => {
-      if (e.candidate) channel.postMessage({ type: 'ICE', candidate: e.candidate, from: 'client' });
+      if (e.candidate) {
+        iceBuf.push(e.candidate);
+        sb.from('sinalizacao').update({ ice_client: JSON.stringify(iceBuf) }).eq('id', callId);
+      }
     };
-    p.ontrack = (e) => {
-      remoteVideo.srcObject = e.streams[0];
-    };
+    p.ontrack = (e) => { remoteVideo.srcObject = e.streams[0]; };
     return p;
   }
 
-  function openCallScreen(msg) {
-    callScreen.classList.remove('hidden');
-    callStatusMsg.textContent = msg || 'Conectando...';
-  }
-
   function endCall() {
+    if (sigChannel) { sb.removeChannel(sigChannel); sigChannel = null; }
     if (pc) { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
     localVideo.srcObject  = null;
     remoteVideo.srcObject = null;
     callScreen.classList.add('hidden');
     callStatusMsg.textContent = 'Conectando...';
+    callId = null;
   }
 }
 
-// ════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 // PAINEL DA CRIADORA
-// ════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 if (document.body.classList.contains('page-criadora')) {
-  const loginScreen      = document.getElementById('loginScreen');
-  const dashboardScreen  = document.getElementById('dashboardScreen');
-  const loginForm        = document.getElementById('loginForm');
-  const loginError       = document.getElementById('loginError');
-  const logoutBtn        = document.getElementById('logoutBtn');
-  const btnOnline        = document.getElementById('btnOnline');
-  const btnOffline       = document.getElementById('btnOffline');
-  const statusFeedback   = document.getElementById('statusFeedback');
-  const photoInput       = document.getElementById('photoInput');
-  const dashPhoto        = document.getElementById('dashPhoto');
-  const nameInput        = document.getElementById('nameInput');
-  const saveNameBtn      = document.getElementById('saveNameBtn');
-  const nameFeedback     = document.getElementById('nameFeedback');
-  const incomingSection  = document.getElementById('incomingSection');
-  const acceptCallBtn    = document.getElementById('acceptCallBtn');
-  const rejectCallBtn    = document.getElementById('rejectCallBtn');
-  const callScreen       = document.getElementById('callScreen');
-  const localVideo       = document.getElementById('localVideo');
-  const remoteVideo      = document.getElementById('remoteVideo');
-  const endCallBtn       = document.getElementById('endCallBtn');
-  const callStatusMsg    = document.getElementById('callStatus');
 
-  // Sessão simples em memória
-  let loggedIn    = false;
+  const loginScreen     = document.getElementById('loginScreen');
+  const dashboardScreen = document.getElementById('dashboardScreen');
+  const loginForm       = document.getElementById('loginForm');
+  const loginError      = document.getElementById('loginError');
+  const loginBtn        = document.getElementById('loginBtn');
+  const logoutBtn       = document.getElementById('logoutBtn');
+  const btnOnline       = document.getElementById('btnOnline');
+  const btnOffline      = document.getElementById('btnOffline');
+  const statusFeedback  = document.getElementById('statusFeedback');
+  const photoInput      = document.getElementById('photoInput');
+  const dashPhoto       = document.getElementById('dashPhoto');
+  const nameInput       = document.getElementById('nameInput');
+  const saveNameBtn     = document.getElementById('saveNameBtn');
+  const nameFeedback    = document.getElementById('nameFeedback');
+  const incomingSection = document.getElementById('incomingSection');
+  const acceptCallBtn   = document.getElementById('acceptCallBtn');
+  const rejectCallBtn   = document.getElementById('rejectCallBtn');
+  const callScreen      = document.getElementById('callScreen');
+  const localVideo      = document.getElementById('localVideo');
+  const remoteVideo     = document.getElementById('remoteVideo');
+  const endCallBtn      = document.getElementById('endCallBtn');
+  const callStatusMsg   = document.getElementById('callStatusMsg');
+
   let localStream = null;
-  let pc          = null;
-  let pendingOffer = null;
+  let pc = null;
+  let callId = null;
+  let sigChannel = null;
+  let incomingCallId = null;
 
-  const channel = new BroadcastChannel('mn_signaling');
-
-  // ── Autenticação demo ──
-  function checkSession() {
-    const session = getState('mn_session', '');
-    if (session === 'active') showDashboard();
+  // ── Verifica sessão ──
+  async function init() {
+    const { data: { session } } = await sb.auth.getSession();
+    if (session) showDashboard();
   }
-  checkSession();
+  init();
 
-  loginForm.addEventListener('submit', (e) => {
+  sb.auth.onAuthStateChange((_e, session) => {
+    if (session) showDashboard(); else showLogin();
+  });
+
+  // ── Login ──
+  loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
+    loginBtn.disabled = true;
+    loginBtn.textContent = 'Entrando...';
+    loginError.classList.add('hidden');
+
     const email = document.getElementById('loginEmail').value.trim();
     const pass  = document.getElementById('loginPassword').value;
+    const { error } = await sb.auth.signInWithPassword({ email, password: pass });
 
-    if (email === DEMO_EMAIL && pass === DEMO_PASSWORD) {
-      setState('mn_session', 'active');
-      showDashboard();
-    } else {
+    if (error) {
       loginError.textContent = 'E-mail ou senha incorretos.';
       loginError.classList.remove('hidden');
+      loginBtn.disabled = false;
+      loginBtn.textContent = 'Entrar';
     }
   });
 
-  logoutBtn.addEventListener('click', () => {
-    setState('mn_session', '');
-    setStatusValue('offline');
-    location.reload();
+  // ── Logout ──
+  logoutBtn.addEventListener('click', async () => {
+    await setStatus('offline');
+    await sb.auth.signOut();
   });
 
-  function showDashboard() {
-    loggedIn = true;
+  function showLogin() {
+    dashboardScreen.classList.add('hidden');
+    loginScreen.classList.remove('hidden');
+  }
+
+  async function showDashboard() {
     loginScreen.classList.add('hidden');
     dashboardScreen.classList.remove('hidden');
-    loadDashboardState();
+    await loadPerfil();
+    listenIncomingCalls();
   }
 
-  function loadDashboardState() {
-    const status = getState(KEY_STATUS, 'offline');
-    const name   = getState(KEY_NAME, 'Ana Carla');
-    const photo  = getState(KEY_PHOTO, '');
-
-    nameInput.value = name;
-    if (photo) dashPhoto.src = photo;
-    applyStatus(status);
+  // ── Perfil ──
+  async function loadPerfil() {
+    const { data } = await sb.from('perfil').select('nome, foto_url, status').eq('id', 1).single();
+    if (!data) return;
+    nameInput.value = data.nome || '';
+    if (data.foto_url) dashPhoto.src = data.foto_url;
+    applyStatusUI(data.status || 'offline');
   }
 
-  // ── Status ──
-  function applyStatus(status) {
-    const isOnline = status === 'online';
-    btnOnline.classList.toggle('active',  isOnline);
-    btnOffline.classList.toggle('active', !isOnline);
-    btnOnline.setAttribute('aria-pressed',  String(isOnline));
-    btnOffline.setAttribute('aria-pressed', String(!isOnline));
-    statusFeedback.textContent = isOnline
+  function applyStatusUI(status) {
+    const online = status === 'online';
+    btnOnline.classList.toggle('active',  online);
+    btnOffline.classList.toggle('active', !online);
+    btnOnline.setAttribute('aria-pressed',  String(online));
+    btnOffline.setAttribute('aria-pressed', String(!online));
+    statusFeedback.textContent = online
       ? 'Você está online. Pode receber chamadas.'
       : 'Você está offline. Clientes não podem ligar.';
   }
 
-  function setStatusValue(status) {
-    setState(KEY_STATUS, status);
-    applyStatus(status);
-    channel.postMessage({ type: 'STATUS_CHANGED', status });
+  async function setStatus(status) {
+    await sb.from('perfil').update({ status }).eq('id', 1);
+    applyStatusUI(status);
   }
 
-  btnOnline.addEventListener('click',  () => setStatusValue('online'));
-  btnOffline.addEventListener('click', () => setStatusValue('offline'));
+  btnOnline.addEventListener('click',  () => setStatus('online'));
+  btnOffline.addEventListener('click', () => setStatus('offline'));
 
   // ── Foto ──
-  photoInput.addEventListener('change', (e) => {
+  photoInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const dataUrl = ev.target.result;
-      setState(KEY_PHOTO, dataUrl);
-      dashPhoto.src = dataUrl;
-    };
-    reader.readAsDataURL(file);
+
+    const ext  = file.name.split('.').pop();
+    const path = `criadora/foto.${ext}`;
+    const { error: upErr } = await sb.storage.from('fotos').upload(path, file, { upsert: true });
+    if (upErr) { alert('Erro ao enviar foto. Tente novamente.'); return; }
+
+    const { data: urlData } = sb.storage.from('fotos').getPublicUrl(path);
+    const url = urlData.publicUrl;
+    await sb.from('perfil').update({ foto_url: url }).eq('id', 1);
+    dashPhoto.src = url + '?t=' + Date.now();
   });
 
   // ── Nome ──
-  saveNameBtn.addEventListener('click', () => {
-    const name = nameInput.value.trim();
-    if (!name) return;
-    setState(KEY_NAME, name);
+  saveNameBtn.addEventListener('click', async () => {
+    const nome = nameInput.value.trim();
+    if (!nome) return;
+    await sb.from('perfil').update({ nome }).eq('id', 1);
     nameFeedback.textContent = 'Nome salvo!';
     nameFeedback.classList.remove('hidden');
     setTimeout(() => nameFeedback.classList.add('hidden'), 2000);
   });
 
-  // ── Chamadas recebidas ──
-  channel.addEventListener('message', async (e) => {
-    if (e.data.type === 'CALL_REQUEST' && loggedIn) {
-      pendingOffer = e.data.offer;
-      incomingSection.classList.remove('hidden');
-    }
-    if (e.data.type === 'ICE' && e.data.from === 'client' && pc) {
-      try { await pc.addIceCandidate(new RTCIceCandidate(e.data.candidate)); } catch {}
-    }
-    if (e.data.type === 'CALL_ENDED') endCall();
-  });
-
-  acceptCallBtn.addEventListener('click', async () => {
-    incomingSection.classList.add('hidden');
-    try {
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localVideo.srcObject = localStream;
-      callScreen.classList.remove('hidden');
-      await answerCall();
-    } catch {
-      alert('Não foi possível acessar câmera/microfone.');
-    }
-  });
-
-  rejectCallBtn.addEventListener('click', () => {
-    incomingSection.classList.add('hidden');
-    channel.postMessage({ type: 'CALL_REJECTED' });
-    pendingOffer = null;
-  });
-
-  async function answerCall() {
-    pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-    pc.onicecandidate = (e) => {
-      if (e.candidate) channel.postMessage({ type: 'ICE', candidate: e.candidate, from: 'criadora' });
-    };
-    pc.ontrack = (e) => {
-      remoteVideo.srcObject = e.streams[0];
-    };
-    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-    await pc.setRemoteDescription(new RTCSessionDescription(pendingOffer));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    channel.postMessage({ type: 'CALL_ACCEPTED', answer });
-    pendingOffer = null;
+  // ── Escuta chamadas entrantes ──
+  function listenIncomingCalls() {
+    sb.channel('incoming-calls')
+      .on('postgres_changes', {
+          event: 'INSERT', schema: 'public', table: 'sinalizacao',
+          filter: 'status=eq.calling'
+        },
+        (payload) => {
+          incomingCallId = payload.new.id;
+          incomingSection.classList.remove('hidden');
+        }
+      ).subscribe();
   }
 
-  endCallBtn.addEventListener('click', () => {
-    channel.postMessage({ type: 'CALL_ENDED' });
+  // ── Atender chamada ──
+  acceptCallBtn.addEventListener('click', async () => {
+    incomingSection.classList.add('hidden');
+    callId = incomingCallId;
+
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    } catch {
+      alert('Autorize câmera e microfone para atender.');
+      await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', callId);
+      return;
+    }
+
+    localVideo.srcObject = localStream;
+    callScreen.classList.remove('hidden');
+    callStatusMsg.textContent = 'Chamada em andamento';
+
+    // Busca offer do cliente
+    const { data: row } = await sb.from('sinalizacao').select('offer, ice_client').eq('id', callId).single();
+
+    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const iceBuf = [];
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        iceBuf.push(e.candidate);
+        sb.from('sinalizacao').update({ ice_criadora: JSON.stringify(iceBuf) }).eq('id', callId);
+      }
+    };
+    pc.ontrack = (e) => { remoteVideo.srcObject = e.streams[0]; };
+
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    await pc.setRemoteDescription(JSON.parse(row.offer));
+
+    if (row.ice_client) {
+      for (const c of JSON.parse(row.ice_client)) { try { await pc.addIceCandidate(c); } catch {} }
+    }
+
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await sb.from('sinalizacao').update({ answer: JSON.stringify(answer), status: 'active' }).eq('id', callId);
+
+    // Escuta encerramento pelo cliente
+    sigChannel = sb.channel('sig-criadora-' + callId)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}` },
+        (payload) => { if (payload.new.status === 'ended') endCall(); }
+      ).subscribe();
+  });
+
+  // ── Recusar chamada ──
+  rejectCallBtn.addEventListener('click', async () => {
+    incomingSection.classList.add('hidden');
+    if (incomingCallId) {
+      await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', incomingCallId);
+      incomingCallId = null;
+    }
+  });
+
+  // ── Encerrar chamada ──
+  endCallBtn.addEventListener('click', async () => {
+    if (callId) await sb.from('sinalizacao').update({ status: 'ended' }).eq('id', callId);
     endCall();
   });
 
   function endCall() {
+    if (sigChannel) { sb.removeChannel(sigChannel); sigChannel = null; }
     if (pc) { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
     localVideo.srcObject  = null;
     remoteVideo.srcObject = null;
     callScreen.classList.add('hidden');
+    callId = null;
   }
 }
