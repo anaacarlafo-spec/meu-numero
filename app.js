@@ -13,33 +13,50 @@ const ICE_SERVERS = [
   { urls: 'stun:stun3.l.google.com:19302' }
 ];
 
-// Constraints de video HD 720p
+// Minimo: HD 720p (5 Mbps+)
+// Ideal:  Full HD 1080p
+// Maximo: 4K se o dispositivo suportar
 const VIDEO_CONSTRAINTS = {
   video: {
-    width:     { ideal: 1280 },
-    height:    { ideal: 720 },
-    frameRate: { ideal: 30 },
+    width:     { min: 1280, ideal: 1920, max: 3840 },
+    height:    { min: 720,  ideal: 1080, max: 2160 },
+    frameRate: { min: 24,   ideal: 30,   max: 60   },
     facingMode: 'user'
   },
   audio: {
     echoCancellation: true,
     noiseSuppression: true,
-    sampleRate: 48000
+    autoGainControl:  true,
+    sampleRate:       48000,
+    channelCount:     2
   }
 };
 
-// Aumenta bitrate do video apos conexao estabelecida
+// Bitrate adaptativo baseado em conexao estimada
+// Min: 2.5 Mbps (720p fluido) | Ideal: 6 Mbps (1080p) | Max: 15 Mbps (4K)
 async function boostBitrate(pc) {
   try {
     const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
     if (!sender) return;
     const params = sender.getParameters();
-    if (!params.encodings || params.encodings.length === 0) {
-      params.encodings = [{}];
-    }
-    params.encodings[0].maxBitrate = 2_500_000; // 2.5 Mbps
-    params.encodings[0].maxFramerate = 30;
+    if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+    params.encodings[0].minBitrate    =  2_500_000;  // 2.5 Mbps minimo
+    params.encodings[0].maxBitrate    = 15_000_000;  // 15 Mbps maximo
+    params.encodings[0].maxFramerate  = 60;
+    params.encodings[0].networkPriority = 'high';
+    params.encodings[0].priority        = 'high';
     await sender.setParameters(params);
+  } catch {}
+
+  // Audio
+  try {
+    const aSender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+    if (!aSender) return;
+    const ap = aSender.getParameters();
+    if (!ap.encodings || ap.encodings.length === 0) ap.encodings = [{}];
+    ap.encodings[0].maxBitrate   = 128_000;  // 128 kbps audio stereo
+    ap.encodings[0].priority     = 'high';
+    await aSender.setParameters(ap);
   } catch {}
 }
 
@@ -63,6 +80,24 @@ function waitForIce(p, ms = 3000) {
       if (p.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
     });
   });
+}
+
+// getUserMedia com fallback gracioso
+async function getMedia() {
+  try {
+    return await navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS);
+  } catch {
+    // Fallback 1: 720p fixo
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        video: { width: 1280, height: 720, frameRate: 30, facingMode: 'user' },
+        audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 }
+      });
+    } catch {
+      // Fallback 2: qualquer camera
+      return await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    }
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -98,11 +133,11 @@ if (document.body.classList.contains('page-home')) {
 
   function applyStatus(status) {
     const online = status === 'online';
-    statusDot.className    = 'status-dot ' + (online ? 'online' : 'offline');
-    statusLabel.className  = 'status-label ' + (online ? 'online-text' : 'offline-text');
+    statusDot.className     = 'status-dot ' + (online ? 'online' : 'offline');
+    statusLabel.className   = 'status-label ' + (online ? 'online-text' : 'offline-text');
     statusLabel.textContent = online ? 'Online agora' : 'Offline agora';
-    callBtn.disabled = !online;
-    callHint.textContent = online
+    callBtn.disabled        = !online;
+    callHint.textContent    = online
       ? 'Clique para iniciar a videochamada.'
       : 'A criadora está offline no momento.';
   }
@@ -118,16 +153,11 @@ if (document.body.classList.contains('page-home')) {
   callBtn.addEventListener('click', async () => {
     callBtn.disabled = true;
     try {
-      localStream = await navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS);
+      localStream = await getMedia();
     } catch {
-      // Fallback para qualquer camera disponivel
-      try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      } catch {
-        alert('Para ligar, autorize o acesso à câmera e ao microfone no seu navegador.');
-        callBtn.disabled = false;
-        return;
-      }
+      alert('Para ligar, autorize o acesso à câmera e ao microfone no seu navegador.');
+      callBtn.disabled = false;
+      return;
     }
 
     localVideo.srcObject = localStream;
@@ -142,7 +172,10 @@ if (document.body.classList.contains('page-home')) {
       .select().single();
     callId = row.id;
 
-    const offer = await pc.createOffer();
+    const offer = await pc.createOffer({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true
+    });
     await pc.setLocalDescription(offer);
     await waitForIce(pc);
 
@@ -156,7 +189,6 @@ if (document.body.classList.contains('page-home')) {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
       }, async (payload) => {
         const r = payload.new;
-
         if (r.answer && pc && pc.signalingState === 'have-local-offer') {
           try {
             await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(r.answer)));
@@ -167,15 +199,10 @@ if (document.body.classList.contains('page-home')) {
             }
           } catch (e) { console.error('setRemoteDescription error', e); }
         }
-
         if (r.ice_criadora) {
-          if (pc && pc.remoteDescription) {
-            await applyIceCandidates(pc, r.ice_criadora);
-          } else {
-            pendingCriadoraIce = r.ice_criadora;
-          }
+          if (pc && pc.remoteDescription) await applyIceCandidates(pc, r.ice_criadora);
+          else pendingCriadoraIce = r.ice_criadora;
         }
-
         if (r.status === 'rejected') {
           callStatusMsg.textContent = 'Chamada não atendida.';
           setTimeout(endCall, 2000);
@@ -362,15 +389,11 @@ if (document.body.classList.contains('page-criadora')) {
     callId = incomingCallId;
 
     try {
-      localStream = await navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS);
+      localStream = await getMedia();
     } catch {
-      try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      } catch {
-        alert('Autorize câmera e microfone para atender.');
-        await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', callId);
-        return;
-      }
+      alert('Autorize câmera e microfone para atender.');
+      await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', callId);
+      return;
     }
 
     localVideo.srcObject = localStream;
@@ -391,11 +414,9 @@ if (document.body.classList.contains('page-criadora')) {
     }
 
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-
     pc.ontrack = (e) => {
       if (e.streams && e.streams[0]) remoteVideo.srcObject = e.streams[0];
     };
-
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') {
         callStatusMsg.textContent = 'Chamada em andamento';
@@ -408,12 +429,8 @@ if (document.body.classList.contains('page-criadora')) {
     };
 
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-
     await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(row.offer)));
-
-    if (row.ice_client) {
-      await applyIceCandidates(pc, JSON.stringify(JSON.parse(row.ice_client)));
-    }
+    if (row.ice_client) await applyIceCandidates(pc, JSON.stringify(JSON.parse(row.ice_client)));
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
@@ -432,9 +449,7 @@ if (document.body.classList.contains('page-criadora')) {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
       }, async (payload) => {
         const r = payload.new;
-        if (r.ice_client && pc && pc.remoteDescription) {
-          await applyIceCandidates(pc, r.ice_client);
-        }
+        if (r.ice_client && pc && pc.remoteDescription) await applyIceCandidates(pc, r.ice_client);
         if (r.status === 'ended') endCall();
       }).subscribe();
   });
