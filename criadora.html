@@ -39,6 +39,23 @@
       </div>
     </header>
 
+    <!-- Notificação de chamada recebida — banner fixo abaixo do cabeçalho -->
+    <div id="incomingSection" class="incoming-banner hidden" role="alert" aria-live="assertive">
+      <div class="incoming-banner-inner">
+        <div class="incoming-banner-info">
+          <span class="incoming-banner-icon" aria-hidden="true">📞</span>
+          <div>
+            <p class="incoming-banner-title">Chamada recebida</p>
+            <p class="incoming-banner-sub">Um cliente está ligando para você!</p>
+          </div>
+        </div>
+        <div class="incoming-banner-actions">
+          <button id="acceptCallBtn" class="btn-accept">Atender</button>
+          <button id="rejectCallBtn" class="btn-reject">Recusar</button>
+        </div>
+      </div>
+    </div>
+
     <main class="dash-main">
 
       <section class="dash-section">
@@ -71,16 +88,6 @@
           <button id="saveNameBtn" class="btn-primary">Salvar</button>
         </div>
         <p id="nameFeedback" class="status-feedback hidden"></p>
-      </section>
-
-      <!-- Chamada recebida -->
-      <section id="incomingSection" class="dash-section incoming-section hidden">
-        <h2 class="dash-section-title">📞 Chamada recebida</h2>
-        <p class="incoming-msg">Um cliente está ligando para você!</p>
-        <div class="incoming-actions">
-          <button id="acceptCallBtn" class="btn-primary">Atender</button>
-          <button id="rejectCallBtn" class="btn-ghost-border">Recusar</button>
-        </div>
       </section>
 
     </main>

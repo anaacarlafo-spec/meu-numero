@@ -304,7 +304,7 @@ button { cursor: pointer; background: none; border: none; }
   background: var(--bg-card);
   position: sticky;
   top: 0;
-  z-index: 10;
+  z-index: 20;
 }
 
 .dash-logo {
@@ -397,12 +397,91 @@ button { cursor: pointer; background: none; border: none; }
 .name-edit .form-input { flex: 1; min-width: 160px; }
 .name-edit .btn-primary { width: auto; white-space: nowrap; }
 
-/* Incoming call */
-.incoming-section { border-color: var(--gold-soft); }
-.incoming-msg { color: var(--white-soft); font-size: 1rem; }
-.incoming-actions { display: flex; gap: 0.75rem; }
-.incoming-actions .btn-primary { width: auto; flex: 1; }
-.incoming-actions .btn-ghost   { flex: 1; border: 1px solid var(--border); border-radius: var(--radius-md); }
+/* ---------- BANNER DE CHAMADA RECEBIDA ---------- */
+.incoming-banner {
+  position: sticky;
+  top: 57px; /* altura do dash-header */
+  z-index: 15;
+  background: #1a1200;
+  border-bottom: 1px solid var(--gold-soft);
+  box-shadow: 0 4px 20px rgba(201, 168, 76, 0.15);
+  animation: slideDown 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slideDown {
+  from { transform: translateY(-100%); opacity: 0; }
+  to   { transform: translateY(0);     opacity: 1; }
+}
+
+.incoming-banner-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.875rem 1.5rem;
+  max-width: 540px;
+  margin: 0 auto;
+  flex-wrap: wrap;
+}
+
+.incoming-banner-info {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+}
+
+.incoming-banner-icon {
+  font-size: 1.5rem;
+  line-height: 1;
+  animation: ring 0.6s ease-in-out infinite alternate;
+}
+
+@keyframes ring {
+  from { transform: rotate(-12deg); }
+  to   { transform: rotate(12deg); }
+}
+
+.incoming-banner-title {
+  font-family: 'Cormorant Garamond', Georgia, serif;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--gold);
+  max-width: none;
+}
+
+.incoming-banner-sub {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  max-width: none;
+}
+
+.incoming-banner-actions {
+  display: flex;
+  gap: 0.625rem;
+  flex-shrink: 0;
+}
+
+.btn-accept {
+  padding: 0.6rem 1.25rem;
+  background: var(--gold);
+  color: #0a0a0a;
+  border-radius: var(--radius-md);
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: background var(--transition), transform var(--transition);
+}
+.btn-accept:hover  { background: var(--gold-bright); transform: translateY(-1px); }
+.btn-accept:active { transform: translateY(0); }
+
+.btn-reject {
+  padding: 0.6rem 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  transition: border-color var(--transition), color var(--transition);
+}
+.btn-reject:hover { border-color: var(--text-muted); color: var(--white-soft); }
 
 /* ---------- CALL SCREEN ---------- */
 .call-screen {
@@ -488,4 +567,8 @@ button { cursor: pointer; background: none; border: none; }
   .creator-photo-wrap { width: 130px; height: 130px; }
   .creator-photo { width: 130px; height: 130px; }
   .status-dot { width: 15px; height: 15px; }
+
+  .incoming-banner-inner { flex-direction: column; align-items: flex-start; }
+  .incoming-banner-actions { width: 100%; }
+  .btn-accept, .btn-reject { flex: 1; text-align: center; }
 }
