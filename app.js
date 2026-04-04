@@ -8,12 +8,27 @@ const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' }
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' }
 ];
 
-// ══════════════════════════════════════════
+// Aplica ICE candidates acumulados no PC
+async function applyIceCandidates(pc, candidatesJson) {
+  if (!candidatesJson || !pc) return;
+  try {
+    const candidates = JSON.parse(candidatesJson);
+    for (const c of candidates) {
+      if (pc.remoteDescription) {
+        try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+      }
+    }
+  } catch {}
+}
+
+// ══════════════════════════════════════════════════════════════
 // HOME — página pública da criadora
-// ══════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 if (document.body.classList.contains('page-home')) {
 
   const creatorPhoto  = document.getElementById('creatorPhoto');
@@ -32,6 +47,8 @@ if (document.body.classList.contains('page-home')) {
   let pc = null;
   let callId = null;
   let sigChannel = null;
+  // Guarda ICE candidates da criadora que chegaram antes do remoteDescription estar pronto
+  let pendingCriadoraIce = null;
 
   async function loadPerfil() {
     const { data } = await sb.from('perfil').select('nome, foto_url, status').eq('id', 1).single();
@@ -61,40 +78,71 @@ if (document.body.classList.contains('page-home')) {
     .subscribe();
 
   callBtn.addEventListener('click', async () => {
+    callBtn.disabled = true;
     try {
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     } catch {
       alert('Para ligar, autorize o acesso à câmera e ao microfone no seu navegador.');
+      callBtn.disabled = false;
       return;
     }
+
     localVideo.srcObject = localStream;
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
 
-    const { data: row } = await sb.from('sinalizacao').insert({ role: 'client', status: 'calling' }).select().single();
-    callId = row.id;
-
+    // Cria o PC antes de criar a oferta
     pc = buildPC();
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
+    // Cria o registro de sinalização
+    const { data: row } = await sb.from('sinalizacao')
+      .insert({ role: 'client', status: 'calling' })
+      .select().single();
+    callId = row.id;
+
+    // Cria offer
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    await sb.from('sinalizacao').update({ offer: JSON.stringify(offer) }).eq('id', callId);
 
+    // Aguarda coleta de ICE candidates (trickle)
+    await waitForIce(pc);
+
+    // Salva offer + ICE do cliente já consolidados
+    await sb.from('sinalizacao').update({
+      offer: JSON.stringify(pc.localDescription),
+      ice_client: JSON.stringify(
+        pc.localDescription.sdp  // ICE já embutido no SDP completo
+      )
+    }).eq('id', callId);
+
+    // Escuta resposta da criadora
     sigChannel = sb.channel('sig-client-' + callId)
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
       }, async (payload) => {
         const r = payload.new;
-        if (r.answer && pc.signalingState !== 'stable') {
-          await pc.setRemoteDescription(JSON.parse(r.answer));
-          callStatusMsg.textContent = 'Chamada em andamento';
+
+        if (r.answer && pc && pc.signalingState === 'have-local-offer') {
+          try {
+            await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(r.answer)));
+            callStatusMsg.textContent = 'Chamada em andamento';
+            // Aplica ICE da criadora que possa ter chegado antes
+            if (pendingCriadoraIce) {
+              await applyIceCandidates(pc, pendingCriadoraIce);
+              pendingCriadoraIce = null;
+            }
+          } catch (e) { console.error('setRemoteDescription error', e); }
         }
+
         if (r.ice_criadora) {
-          for (const c of JSON.parse(r.ice_criadora)) {
-            try { await pc.addIceCandidate(c); } catch {}
+          if (pc && pc.remoteDescription) {
+            await applyIceCandidates(pc, r.ice_criadora);
+          } else {
+            pendingCriadoraIce = r.ice_criadora;
           }
         }
+
         if (r.status === 'rejected') {
           callStatusMsg.textContent = 'Chamada não atendida.';
           setTimeout(endCall, 2000);
@@ -108,16 +156,31 @@ if (document.body.classList.contains('page-home')) {
     endCall();
   });
 
+  // Aguarda coleta de ICE candidates (máx 2s)
+  function waitForIce(p) {
+    return new Promise(resolve => {
+      if (p.iceGatheringState === 'complete') { resolve(); return; }
+      const timer = setTimeout(resolve, 2000);
+      p.addEventListener('icegatheringstatechange', () => {
+        if (p.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
+      });
+    });
+  }
+
   function buildPC() {
     const p = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    const iceBuf = [];
-    p.onicecandidate = (e) => {
-      if (e.candidate) {
-        iceBuf.push(e.candidate);
-        sb.from('sinalizacao').update({ ice_client: JSON.stringify(iceBuf) }).eq('id', callId);
+    p.ontrack = (e) => {
+      if (e.streams && e.streams[0]) {
+        remoteVideo.srcObject = e.streams[0];
       }
     };
-    p.ontrack = (e) => { remoteVideo.srcObject = e.streams[0]; };
+    p.onconnectionstatechange = () => {
+      if (p.connectionState === 'connected') callStatusMsg.textContent = 'Chamada em andamento';
+      if (p.connectionState === 'failed') {
+        callStatusMsg.textContent = 'Falha na conexão. Tente novamente.';
+        setTimeout(endCall, 3000);
+      }
+    };
     return p;
   }
 
@@ -130,12 +193,14 @@ if (document.body.classList.contains('page-home')) {
     callScreen.classList.add('hidden');
     callStatusMsg.textContent = 'Conectando...';
     callId = null;
+    pendingCriadoraIce = null;
+    callBtn.disabled = false;
   }
 }
 
-// ══════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 // PAINEL DA CRIADORA
-// ══════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
 if (document.body.classList.contains('page-criadora')) {
 
   const loginScreen     = document.getElementById('loginScreen');
@@ -166,6 +231,7 @@ if (document.body.classList.contains('page-criadora')) {
   let callId = null;
   let sigChannel = null;
   let incomingCallId = null;
+  let pendingClienteIce = null;
 
   async function init() {
     const { data: { session } } = await sb.auth.getSession();
@@ -272,6 +338,7 @@ if (document.body.classList.contains('page-criadora')) {
   acceptCallBtn.addEventListener('click', async () => {
     incomingSection.classList.add('hidden');
     callId = incomingCallId;
+
     try {
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     } catch {
@@ -279,40 +346,78 @@ if (document.body.classList.contains('page-criadora')) {
       await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', callId);
       return;
     }
+
     localVideo.srcObject = localStream;
     callScreen.classList.remove('hidden');
-    callStatusMsg.textContent = 'Chamada em andamento';
+    callStatusMsg.textContent = 'Conectando...';
 
-    const { data: row } = await sb.from('sinalizacao').select('offer, ice_client').eq('id', callId).single();
-
-    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    const iceBuf = [];
-    pc.onicecandidate = (e) => {
-      if (e.candidate) {
-        iceBuf.push(e.candidate);
-        sb.from('sinalizacao').update({ ice_criadora: JSON.stringify(iceBuf) }).eq('id', callId);
-      }
-    };
-    pc.ontrack = (e) => { remoteVideo.srcObject = e.streams[0]; };
-
-    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-    await pc.setRemoteDescription(JSON.parse(row.offer));
-
-    if (row.ice_client) {
-      for (const c of JSON.parse(row.ice_client)) {
-        try { await pc.addIceCandidate(c); } catch {}
-      }
+    // Busca offer do cliente (aguarda até ter offer)
+    let row = null;
+    for (let i = 0; i < 10; i++) {
+      const { data } = await sb.from('sinalizacao').select('offer, ice_client').eq('id', callId).single();
+      if (data && data.offer) { row = data; break; }
+      await new Promise(r => setTimeout(r, 500));
     }
 
+    if (!row || !row.offer) {
+      alert('Erro ao conectar. Tente novamente.');
+      endCall();
+      return;
+    }
+
+    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+    pc.ontrack = (e) => {
+      if (e.streams && e.streams[0]) {
+        remoteVideo.srcObject = e.streams[0];
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'connected') callStatusMsg.textContent = 'Chamada em andamento';
+      if (pc.connectionState === 'failed') {
+        callStatusMsg.textContent = 'Falha na conexão.';
+        setTimeout(endCall, 3000);
+      }
+    };
+
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+    // Seta remote description (offer do cliente)
+    await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(row.offer)));
+
+    // Aplica ICE do cliente (se já disponível)
+    if (row.ice_client) {
+      await applyIceCandidates(pc, JSON.stringify(JSON.parse(row.ice_client)));
+    }
+
+    // Cria answer
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    await sb.from('sinalizacao').update({ answer: JSON.stringify(answer), status: 'active' }).eq('id', callId);
 
+    // Aguarda coleta de ICE
+    await waitForIce(pc);
+
+    // Salva answer com ICE embutido no SDP
+    await sb.from('sinalizacao').update({
+      answer: JSON.stringify(pc.localDescription),
+      ice_criadora: JSON.stringify(pc.localDescription.sdp),
+      status: 'active'
+    }).eq('id', callId);
+
+    callStatusMsg.textContent = 'Chamada em andamento';
+
+    // Escuta encerramento pelo cliente
     sigChannel = sb.channel('sig-criadora-' + callId)
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
-      }, (payload) => {
-        if (payload.new.status === 'ended') endCall();
+      }, async (payload) => {
+        const r = payload.new;
+        // Aplica ICE adicional do cliente se chegou depois
+        if (r.ice_client && pc && pc.remoteDescription) {
+          await applyIceCandidates(pc, r.ice_client);
+        }
+        if (r.status === 'ended') endCall();
       }).subscribe();
   });
 
@@ -329,6 +434,16 @@ if (document.body.classList.contains('page-criadora')) {
     endCall();
   });
 
+  function waitForIce(p) {
+    return new Promise(resolve => {
+      if (p.iceGatheringState === 'complete') { resolve(); return; }
+      const timer = setTimeout(resolve, 3000);
+      p.addEventListener('icegatheringstatechange', () => {
+        if (p.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
+      });
+    });
+  }
+
   function endCall() {
     if (sigChannel) { sb.removeChannel(sigChannel); sigChannel = null; }
     if (pc) { pc.close(); pc = null; }
@@ -337,5 +452,6 @@ if (document.body.classList.contains('page-criadora')) {
     remoteVideo.srcObject = null;
     callScreen.classList.add('hidden');
     callId = null;
+    pendingClienteIce = null;
   }
 }
