@@ -13,49 +13,42 @@ const ICE_SERVERS = [
   { urls: 'stun:stun3.l.google.com:19302' }
 ];
 
-// Minimo: HD 720p (5 Mbps+)
-// Ideal:  Full HD 1080p
-// Maximo: 4K se o dispositivo suportar
 const VIDEO_CONSTRAINTS = {
   video: {
     width:     { min: 1280, ideal: 1920, max: 3840 },
     height:    { min: 720,  ideal: 1080, max: 2160 },
-    frameRate: { min: 24,   ideal: 30,   max: 60   },
+    frameRate: { min: 24,   ideal: 30,   max: 60 },
     facingMode: 'user'
   },
   audio: {
     echoCancellation: true,
     noiseSuppression: true,
     autoGainControl:  true,
-    sampleRate:       48000,
-    channelCount:     2
+    sampleRate: 48000,
+    channelCount: 2
   }
 };
 
-// Bitrate adaptativo baseado em conexao estimada
-// Min: 2.5 Mbps (720p fluido) | Ideal: 6 Mbps (1080p) | Max: 15 Mbps (4K)
 async function boostBitrate(pc) {
   try {
     const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
     if (!sender) return;
     const params = sender.getParameters();
     if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
-    params.encodings[0].minBitrate    =  2_500_000;  // 2.5 Mbps minimo
-    params.encodings[0].maxBitrate    = 15_000_000;  // 15 Mbps maximo
-    params.encodings[0].maxFramerate  = 60;
+    params.encodings[0].minBitrate      = 2_500_000;
+    params.encodings[0].maxBitrate      = 15_000_000;
+    params.encodings[0].maxFramerate    = 60;
     params.encodings[0].networkPriority = 'high';
     params.encodings[0].priority        = 'high';
     await sender.setParameters(params);
   } catch {}
-
-  // Audio
   try {
     const aSender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
     if (!aSender) return;
     const ap = aSender.getParameters();
     if (!ap.encodings || ap.encodings.length === 0) ap.encodings = [{}];
-    ap.encodings[0].maxBitrate   = 128_000;  // 128 kbps audio stereo
-    ap.encodings[0].priority     = 'high';
+    ap.encodings[0].maxBitrate = 128_000;
+    ap.encodings[0].priority   = 'high';
     await aSender.setParameters(ap);
   } catch {}
 }
@@ -82,26 +75,23 @@ function waitForIce(p, ms = 3000) {
   });
 }
 
-// getUserMedia com fallback gracioso
 async function getMedia() {
   try {
     return await navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS);
   } catch {
-    // Fallback 1: 720p fixo
     try {
       return await navigator.mediaDevices.getUserMedia({
         video: { width: 1280, height: 720, frameRate: 30, facingMode: 'user' },
         audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 48000 }
       });
     } catch {
-      // Fallback 2: qualquer camera
       return await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     }
   }
 }
 
 // ══════════════════════════════════════════════════════════════
-// HOME — página pública da criadora
+// HOME — página pública
 // ══════════════════════════════════════════════════════════════
 if (document.body.classList.contains('page-home')) {
 
@@ -172,10 +162,7 @@ if (document.body.classList.contains('page-home')) {
       .select().single();
     callId = row.id;
 
-    const offer = await pc.createOffer({
-      offerToReceiveAudio: true,
-      offerToReceiveVideo: true
-    });
+    const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
     await pc.setLocalDescription(offer);
     await waitForIce(pc);
 
@@ -276,10 +263,10 @@ if (document.body.classList.contains('page-criadora')) {
   const endCallBtn      = document.getElementById('endCallBtn');
   const callStatusMsg   = document.getElementById('callStatusMsg');
 
-  let localStream = null;
-  let pc = null;
-  let callId = null;
-  let sigChannel = null;
+  let localStream    = null;
+  let pc             = null;
+  let callId         = null;
+  let sigChannel     = null;
   let incomingCallId = null;
 
   async function init() {
@@ -294,7 +281,7 @@ if (document.body.classList.contains('page-criadora')) {
 
   loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-    loginBtn.disabled = true;
+    loginBtn.disabled    = true;
     loginBtn.textContent = 'Entrando...';
     loginError.classList.add('hidden');
     const email = document.getElementById('loginEmail').value.trim();
@@ -303,7 +290,7 @@ if (document.body.classList.contains('page-criadora')) {
     if (error) {
       loginError.textContent = 'E-mail ou senha incorretos.';
       loginError.classList.remove('hidden');
-      loginBtn.disabled = false;
+      loginBtn.disabled    = false;
       loginBtn.textContent = 'Entrar';
     }
   });
@@ -375,12 +362,18 @@ if (document.body.classList.contains('page-criadora')) {
   });
 
   function listenIncomingCalls() {
+    // IMPORTANTE: o Supabase Realtime NAO suporta filtro em eventos INSERT.
+    // Por isso escutamos qualquer INSERT e filtramos manualmente pelo status.
     sb.channel('incoming-calls')
       .on('postgres_changes', {
-        event: 'INSERT', schema: 'public', table: 'sinalizacao', filter: 'status=eq.calling'
+        event: 'INSERT', schema: 'public', table: 'sinalizacao'
       }, (payload) => {
-        incomingCallId = payload.new.id;
-        incomingSection.classList.remove('hidden');
+        const row = payload.new;
+        // So exibe se status for 'calling' (ignora outros inserts eventuais)
+        if (row.status === 'calling') {
+          incomingCallId = row.id;
+          incomingSection.classList.remove('hidden');
+        }
       }).subscribe();
   }
 
@@ -400,6 +393,7 @@ if (document.body.classList.contains('page-criadora')) {
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Conectando...';
 
+    // Aguarda offer do cliente (pode demorar alguns ms para chegar)
     let row = null;
     for (let i = 0; i < 10; i++) {
       const { data } = await sb.from('sinalizacao').select('offer, ice_client').eq('id', callId).single();
@@ -408,7 +402,7 @@ if (document.body.classList.contains('page-criadora')) {
     }
 
     if (!row || !row.offer) {
-      alert('Erro ao conectar. Tente novamente.');
+      alert('Erro ao conectar: oferta não chegou. Tente novamente.');
       endCall();
       return;
     }
