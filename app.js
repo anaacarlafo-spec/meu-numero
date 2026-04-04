@@ -1,47 +1,19 @@
-/**
- * app.js — Meu Número V1
- *
- * Supabase é usado para:
- *   1. Autenticação real da criadora (Supabase Auth)
- *   2. Perfil da criadora: nome, foto, status (tabela `perfil`)
- *   3. Sinalização WebRTC multidevice (tabela `sinalizacao` + Realtime)
- *
- * WebRTC faz a chamada de vídeo peer-to-peer diretamente entre os navegadores.
- */
-
 'use strict';
 
-// ── Lê config do Supabase injetada no HTML via meta tags (valores substituídos pelo Vercel) ──
-function getMeta(name) {
-  const el = document.querySelector(`meta[name="${name}"]`);
-  return el ? el.getAttribute('content') : '';
-}
-
-const SUPABASE_URL  = getMeta('supabase-url');
-const SUPABASE_KEY  = getMeta('supabase-key');
-
-if (!SUPABASE_URL || SUPABASE_URL === '__SUPABASE_URL__') {
-  document.body.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:center;min-height:100dvh;background:#0a0a0a;">
-      <div style="text-align:center;color:#C9A84C;font-family:Inter,sans-serif;padding:2rem;">
-        <h2 style="font-family:'Cormorant Garamond',serif;font-size:1.8rem;margin-bottom:1rem;">Configuração pendente</h2>
-        <p style="color:rgba(201,168,76,0.65);max-width:40ch;margin:0 auto;">
-          As variáveis de ambiente do Supabase ainda não foram preenchidas no Vercel.<br><br>
-          Acesse <strong>Vercel → meu-numero → Settings → Environment Variables</strong> e adicione <code>SUPABASE_URL</code> e <code>SUPABASE_ANON_KEY</code>.
-        </p>
-      </div>
-    </div>`;
-  throw new Error('Supabase não configurado.');
-}
+const SUPABASE_URL = 'https://decuqgobcbuwgkaesbvo.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRlY3VxZ29iY2J1d2drYWVzYnZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUzMTEzMTAsImV4cCI6MjA5MDg4NzMxMH0.DbMHj0K36zwOqdfo_y1q3R7HJKHkTzHn2j-BIJIkkiQ';
 
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' }
+];
 
-// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════
 // HOME — página pública da criadora
-// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════
 if (document.body.classList.contains('page-home')) {
 
   const creatorPhoto  = document.getElementById('creatorPhoto');
@@ -61,7 +33,6 @@ if (document.body.classList.contains('page-home')) {
   let callId = null;
   let sigChannel = null;
 
-  // Carrega perfil da criadora
   async function loadPerfil() {
     const { data } = await sb.from('perfil').select('nome, foto_url, status').eq('id', 1).single();
     if (!data) return;
@@ -72,22 +43,23 @@ if (document.body.classList.contains('page-home')) {
 
   function applyStatus(status) {
     const online = status === 'online';
-    statusDot.className   = 'status-dot ' + (online ? 'online' : 'offline');
-    statusLabel.className = 'status-label ' + (online ? 'online-text' : 'offline-text');
+    statusDot.className    = 'status-dot ' + (online ? 'online' : 'offline');
+    statusLabel.className  = 'status-label ' + (online ? 'online-text' : 'offline-text');
     statusLabel.textContent = online ? 'Online agora' : 'Offline agora';
     callBtn.disabled = !online;
-    callHint.textContent = online ? 'Clique para iniciar a videochamada.' : 'A criadora está offline no momento.';
+    callHint.textContent = online
+      ? 'Clique para iniciar a videochamada.'
+      : 'A criadora está offline no momento.';
   }
 
   loadPerfil();
 
-  // Escuta mudanças de status em tempo real
   sb.channel('perfil-status')
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'perfil', filter: 'id=eq.1' },
-      (payload) => applyStatus(payload.new.status)
-    ).subscribe();
+    .on('postgres_changes', {
+      event: 'UPDATE', schema: 'public', table: 'perfil', filter: 'id=eq.1'
+    }, (payload) => applyStatus(payload.new.status))
+    .subscribe();
 
-  // ── Iniciar chamada ──
   callBtn.addEventListener('click', async () => {
     try {
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
@@ -99,7 +71,6 @@ if (document.body.classList.contains('page-home')) {
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
 
-    // Cria registro de sinalização no Supabase
     const { data: row } = await sb.from('sinalizacao').insert({ role: 'client', status: 'calling' }).select().single();
     callId = row.id;
 
@@ -110,26 +81,26 @@ if (document.body.classList.contains('page-home')) {
     await pc.setLocalDescription(offer);
     await sb.from('sinalizacao').update({ offer: JSON.stringify(offer) }).eq('id', callId);
 
-    // Escuta resposta da criadora
     sigChannel = sb.channel('sig-client-' + callId)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}` },
-        async (payload) => {
-          const row = payload.new;
-          if (row.answer && pc.signalingState !== 'stable') {
-            await pc.setRemoteDescription(JSON.parse(row.answer));
-            callStatusMsg.textContent = 'Chamada em andamento';
-          }
-          if (row.ice_criadora) {
-            const candidates = JSON.parse(row.ice_criadora);
-            for (const c of candidates) { try { await pc.addIceCandidate(c); } catch {} }
-          }
-          if (row.status === 'rejected') {
-            callStatusMsg.textContent = 'Chamada não atendida.';
-            setTimeout(endCall, 2000);
-          }
-          if (row.status === 'ended') endCall();
+      .on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
+      }, async (payload) => {
+        const r = payload.new;
+        if (r.answer && pc.signalingState !== 'stable') {
+          await pc.setRemoteDescription(JSON.parse(r.answer));
+          callStatusMsg.textContent = 'Chamada em andamento';
         }
-      ).subscribe();
+        if (r.ice_criadora) {
+          for (const c of JSON.parse(r.ice_criadora)) {
+            try { await pc.addIceCandidate(c); } catch {}
+          }
+        }
+        if (r.status === 'rejected') {
+          callStatusMsg.textContent = 'Chamada não atendida.';
+          setTimeout(endCall, 2000);
+        }
+        if (r.status === 'ended') endCall();
+      }).subscribe();
   });
 
   endCallBtn.addEventListener('click', async () => {
@@ -162,9 +133,9 @@ if (document.body.classList.contains('page-home')) {
   }
 }
 
-// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════
 // PAINEL DA CRIADORA
-// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════
 if (document.body.classList.contains('page-criadora')) {
 
   const loginScreen     = document.getElementById('loginScreen');
@@ -196,7 +167,6 @@ if (document.body.classList.contains('page-criadora')) {
   let sigChannel = null;
   let incomingCallId = null;
 
-  // ── Verifica sessão ──
   async function init() {
     const { data: { session } } = await sb.auth.getSession();
     if (session) showDashboard();
@@ -207,17 +177,14 @@ if (document.body.classList.contains('page-criadora')) {
     if (session) showDashboard(); else showLogin();
   });
 
-  // ── Login ──
   loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     loginBtn.disabled = true;
     loginBtn.textContent = 'Entrando...';
     loginError.classList.add('hidden');
-
     const email = document.getElementById('loginEmail').value.trim();
     const pass  = document.getElementById('loginPassword').value;
     const { error } = await sb.auth.signInWithPassword({ email, password: pass });
-
     if (error) {
       loginError.textContent = 'E-mail ou senha incorretos.';
       loginError.classList.remove('hidden');
@@ -226,7 +193,6 @@ if (document.body.classList.contains('page-criadora')) {
     }
   });
 
-  // ── Logout ──
   logoutBtn.addEventListener('click', async () => {
     await setStatus('offline');
     await sb.auth.signOut();
@@ -244,7 +210,6 @@ if (document.body.classList.contains('page-criadora')) {
     listenIncomingCalls();
   }
 
-  // ── Perfil ──
   async function loadPerfil() {
     const { data } = await sb.from('perfil').select('nome, foto_url, status').eq('id', 1).single();
     if (!data) return;
@@ -272,23 +237,19 @@ if (document.body.classList.contains('page-criadora')) {
   btnOnline.addEventListener('click',  () => setStatus('online'));
   btnOffline.addEventListener('click', () => setStatus('offline'));
 
-  // ── Foto ──
   photoInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-
     const ext  = file.name.split('.').pop();
     const path = `criadora/foto.${ext}`;
     const { error: upErr } = await sb.storage.from('fotos').upload(path, file, { upsert: true });
     if (upErr) { alert('Erro ao enviar foto. Tente novamente.'); return; }
-
     const { data: urlData } = sb.storage.from('fotos').getPublicUrl(path);
     const url = urlData.publicUrl;
     await sb.from('perfil').update({ foto_url: url }).eq('id', 1);
     dashPhoto.src = url + '?t=' + Date.now();
   });
 
-  // ── Nome ──
   saveNameBtn.addEventListener('click', async () => {
     const nome = nameInput.value.trim();
     if (!nome) return;
@@ -298,25 +259,19 @@ if (document.body.classList.contains('page-criadora')) {
     setTimeout(() => nameFeedback.classList.add('hidden'), 2000);
   });
 
-  // ── Escuta chamadas entrantes ──
   function listenIncomingCalls() {
     sb.channel('incoming-calls')
       .on('postgres_changes', {
-          event: 'INSERT', schema: 'public', table: 'sinalizacao',
-          filter: 'status=eq.calling'
-        },
-        (payload) => {
-          incomingCallId = payload.new.id;
-          incomingSection.classList.remove('hidden');
-        }
-      ).subscribe();
+        event: 'INSERT', schema: 'public', table: 'sinalizacao', filter: 'status=eq.calling'
+      }, (payload) => {
+        incomingCallId = payload.new.id;
+        incomingSection.classList.remove('hidden');
+      }).subscribe();
   }
 
-  // ── Atender chamada ──
   acceptCallBtn.addEventListener('click', async () => {
     incomingSection.classList.add('hidden');
     callId = incomingCallId;
-
     try {
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     } catch {
@@ -324,12 +279,10 @@ if (document.body.classList.contains('page-criadora')) {
       await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', callId);
       return;
     }
-
     localVideo.srcObject = localStream;
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Chamada em andamento';
 
-    // Busca offer do cliente
     const { data: row } = await sb.from('sinalizacao').select('offer, ice_client').eq('id', callId).single();
 
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -346,21 +299,23 @@ if (document.body.classList.contains('page-criadora')) {
     await pc.setRemoteDescription(JSON.parse(row.offer));
 
     if (row.ice_client) {
-      for (const c of JSON.parse(row.ice_client)) { try { await pc.addIceCandidate(c); } catch {} }
+      for (const c of JSON.parse(row.ice_client)) {
+        try { await pc.addIceCandidate(c); } catch {}
+      }
     }
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     await sb.from('sinalizacao').update({ answer: JSON.stringify(answer), status: 'active' }).eq('id', callId);
 
-    // Escuta encerramento pelo cliente
     sigChannel = sb.channel('sig-criadora-' + callId)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}` },
-        (payload) => { if (payload.new.status === 'ended') endCall(); }
-      ).subscribe();
+      .on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
+      }, (payload) => {
+        if (payload.new.status === 'ended') endCall();
+      }).subscribe();
   });
 
-  // ── Recusar chamada ──
   rejectCallBtn.addEventListener('click', async () => {
     incomingSection.classList.add('hidden');
     if (incomingCallId) {
@@ -369,7 +324,6 @@ if (document.body.classList.contains('page-criadora')) {
     }
   });
 
-  // ── Encerrar chamada ──
   endCallBtn.addEventListener('click', async () => {
     if (callId) await sb.from('sinalizacao').update({ status: 'ended' }).eq('id', callId);
     endCall();
