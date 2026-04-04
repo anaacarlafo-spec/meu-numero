@@ -13,7 +13,36 @@ const ICE_SERVERS = [
   { urls: 'stun:stun3.l.google.com:19302' }
 ];
 
-// Aplica ICE candidates acumulados no PC
+// Constraints de video HD 720p
+const VIDEO_CONSTRAINTS = {
+  video: {
+    width:     { ideal: 1280 },
+    height:    { ideal: 720 },
+    frameRate: { ideal: 30 },
+    facingMode: 'user'
+  },
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    sampleRate: 48000
+  }
+};
+
+// Aumenta bitrate do video apos conexao estabelecida
+async function boostBitrate(pc) {
+  try {
+    const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+    if (!sender) return;
+    const params = sender.getParameters();
+    if (!params.encodings || params.encodings.length === 0) {
+      params.encodings = [{}];
+    }
+    params.encodings[0].maxBitrate = 2_500_000; // 2.5 Mbps
+    params.encodings[0].maxFramerate = 30;
+    await sender.setParameters(params);
+  } catch {}
+}
+
 async function applyIceCandidates(pc, candidatesJson) {
   if (!candidatesJson || !pc) return;
   try {
@@ -24,6 +53,16 @@ async function applyIceCandidates(pc, candidatesJson) {
       }
     }
   } catch {}
+}
+
+function waitForIce(p, ms = 3000) {
+  return new Promise(resolve => {
+    if (p.iceGatheringState === 'complete') { resolve(); return; }
+    const timer = setTimeout(resolve, ms);
+    p.addEventListener('icegatheringstatechange', () => {
+      if (p.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
+    });
+  });
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -47,7 +86,6 @@ if (document.body.classList.contains('page-home')) {
   let pc = null;
   let callId = null;
   let sigChannel = null;
-  // Guarda ICE candidates da criadora que chegaram antes do remoteDescription estar pronto
   let pendingCriadoraIce = null;
 
   async function loadPerfil() {
@@ -80,43 +118,39 @@ if (document.body.classList.contains('page-home')) {
   callBtn.addEventListener('click', async () => {
     callBtn.disabled = true;
     try {
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localStream = await navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS);
     } catch {
-      alert('Para ligar, autorize o acesso à câmera e ao microfone no seu navegador.');
-      callBtn.disabled = false;
-      return;
+      // Fallback para qualquer camera disponivel
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      } catch {
+        alert('Para ligar, autorize o acesso à câmera e ao microfone no seu navegador.');
+        callBtn.disabled = false;
+        return;
+      }
     }
 
     localVideo.srcObject = localStream;
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
 
-    // Cria o PC antes de criar a oferta
     pc = buildPC();
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-    // Cria o registro de sinalização
     const { data: row } = await sb.from('sinalizacao')
       .insert({ role: 'client', status: 'calling' })
       .select().single();
     callId = row.id;
 
-    // Cria offer
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-
-    // Aguarda coleta de ICE candidates (trickle)
     await waitForIce(pc);
 
-    // Salva offer + ICE do cliente já consolidados
     await sb.from('sinalizacao').update({
-      offer: JSON.stringify(pc.localDescription),
-      ice_client: JSON.stringify(
-        pc.localDescription.sdp  // ICE já embutido no SDP completo
-      )
+      offer:      JSON.stringify(pc.localDescription),
+      ice_client: JSON.stringify(pc.localDescription.sdp)
     }).eq('id', callId);
 
-    // Escuta resposta da criadora
     sigChannel = sb.channel('sig-client-' + callId)
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
@@ -127,7 +161,6 @@ if (document.body.classList.contains('page-home')) {
           try {
             await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(r.answer)));
             callStatusMsg.textContent = 'Chamada em andamento';
-            // Aplica ICE da criadora que possa ter chegado antes
             if (pendingCriadoraIce) {
               await applyIceCandidates(pc, pendingCriadoraIce);
               pendingCriadoraIce = null;
@@ -156,26 +189,16 @@ if (document.body.classList.contains('page-home')) {
     endCall();
   });
 
-  // Aguarda coleta de ICE candidates (máx 2s)
-  function waitForIce(p) {
-    return new Promise(resolve => {
-      if (p.iceGatheringState === 'complete') { resolve(); return; }
-      const timer = setTimeout(resolve, 2000);
-      p.addEventListener('icegatheringstatechange', () => {
-        if (p.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
-      });
-    });
-  }
-
   function buildPC() {
     const p = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     p.ontrack = (e) => {
-      if (e.streams && e.streams[0]) {
-        remoteVideo.srcObject = e.streams[0];
-      }
+      if (e.streams && e.streams[0]) remoteVideo.srcObject = e.streams[0];
     };
     p.onconnectionstatechange = () => {
-      if (p.connectionState === 'connected') callStatusMsg.textContent = 'Chamada em andamento';
+      if (p.connectionState === 'connected') {
+        callStatusMsg.textContent = 'Chamada em andamento';
+        boostBitrate(p);
+      }
       if (p.connectionState === 'failed') {
         callStatusMsg.textContent = 'Falha na conexão. Tente novamente.';
         setTimeout(endCall, 3000);
@@ -231,7 +254,6 @@ if (document.body.classList.contains('page-criadora')) {
   let callId = null;
   let sigChannel = null;
   let incomingCallId = null;
-  let pendingClienteIce = null;
 
   async function init() {
     const { data: { session } } = await sb.auth.getSession();
@@ -340,18 +362,21 @@ if (document.body.classList.contains('page-criadora')) {
     callId = incomingCallId;
 
     try {
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localStream = await navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS);
     } catch {
-      alert('Autorize câmera e microfone para atender.');
-      await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', callId);
-      return;
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      } catch {
+        alert('Autorize câmera e microfone para atender.');
+        await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', callId);
+        return;
+      }
     }
 
     localVideo.srcObject = localStream;
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Conectando...';
 
-    // Busca offer do cliente (aguarda até ter offer)
     let row = null;
     for (let i = 0; i < 10; i++) {
       const { data } = await sb.from('sinalizacao').select('offer, ice_client').eq('id', callId).single();
@@ -368,13 +393,14 @@ if (document.body.classList.contains('page-criadora')) {
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
     pc.ontrack = (e) => {
-      if (e.streams && e.streams[0]) {
-        remoteVideo.srcObject = e.streams[0];
-      }
+      if (e.streams && e.streams[0]) remoteVideo.srcObject = e.streams[0];
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') callStatusMsg.textContent = 'Chamada em andamento';
+      if (pc.connectionState === 'connected') {
+        callStatusMsg.textContent = 'Chamada em andamento';
+        boostBitrate(pc);
+      }
       if (pc.connectionState === 'failed') {
         callStatusMsg.textContent = 'Falha na conexão.';
         setTimeout(endCall, 3000);
@@ -383,37 +409,29 @@ if (document.body.classList.contains('page-criadora')) {
 
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-    // Seta remote description (offer do cliente)
     await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(row.offer)));
 
-    // Aplica ICE do cliente (se já disponível)
     if (row.ice_client) {
       await applyIceCandidates(pc, JSON.stringify(JSON.parse(row.ice_client)));
     }
 
-    // Cria answer
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-
-    // Aguarda coleta de ICE
     await waitForIce(pc);
 
-    // Salva answer com ICE embutido no SDP
     await sb.from('sinalizacao').update({
-      answer: JSON.stringify(pc.localDescription),
+      answer:       JSON.stringify(pc.localDescription),
       ice_criadora: JSON.stringify(pc.localDescription.sdp),
-      status: 'active'
+      status:       'active'
     }).eq('id', callId);
 
     callStatusMsg.textContent = 'Chamada em andamento';
 
-    // Escuta encerramento pelo cliente
     sigChannel = sb.channel('sig-criadora-' + callId)
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
       }, async (payload) => {
         const r = payload.new;
-        // Aplica ICE adicional do cliente se chegou depois
         if (r.ice_client && pc && pc.remoteDescription) {
           await applyIceCandidates(pc, r.ice_client);
         }
@@ -434,16 +452,6 @@ if (document.body.classList.contains('page-criadora')) {
     endCall();
   });
 
-  function waitForIce(p) {
-    return new Promise(resolve => {
-      if (p.iceGatheringState === 'complete') { resolve(); return; }
-      const timer = setTimeout(resolve, 3000);
-      p.addEventListener('icegatheringstatechange', () => {
-        if (p.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
-      });
-    });
-  }
-
   function endCall() {
     if (sigChannel) { sb.removeChannel(sigChannel); sigChannel = null; }
     if (pc) { pc.close(); pc = null; }
@@ -452,6 +460,5 @@ if (document.body.classList.contains('page-criadora')) {
     remoteVideo.srcObject = null;
     callScreen.classList.add('hidden');
     callId = null;
-    pendingClienteIce = null;
   }
 }
