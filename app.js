@@ -13,77 +13,139 @@ const ICE_SERVERS = [
   { urls: 'stun:stun3.l.google.com:19302' }
 ];
 
-// ─────────────────────────────────────────────
-// RING — gerado via Web Audio API (sem arquivo)
-// Toca para o cliente enquanto aguarda.
-// Toca para a criadora quando recebe chamada.
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// RING — Web Audio API
+//
+// REGRA DO BROWSER: AudioContext so pode tocar apos uma
+// interacao do usuario (click/touch). Por isso:
+//
+// - Ring.init()  -> chame SINCRONAMENTE dentro do handler de click
+//                  (cria e resume o AudioContext nesse momento)
+// - Ring.start() -> chame depois (pode ser async, contexto ja esta ativo)
+// - Ring.stop()  -> para o loop
+// ─────────────────────────────────────────────────────────────
 const Ring = (() => {
-  let ctx = null;
-  let gainNode = null;
+  let ctx       = null;
   let loopTimer = null;
-  let playing = false;
+  let active    = false;
 
-  function getCtx() {
-    if (!ctx) {
-      ctx = new (window.AudioContext || window.webkitAudioContext)();
-      gainNode = ctx.createGain();
-      gainNode.gain.value = 0.18; // volume suave
-      gainNode.connect(ctx.destination);
-    }
-    return ctx;
+  // Cria e desbloqueia o AudioContext SINCRONAMENTE no click
+  function init() {
+    if (ctx) return;
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    // resume() deve ser chamado dentro de um user-gesture handler
+    if (ctx.state === 'suspended') ctx.resume();
   }
 
-  // Toca um sino suave: dois tons (1200 Hz + 1500 Hz) com envelope
+  // Dois tons de sino suaves com envelope
   function beep() {
-    const c = getCtx();
-    const now = c.currentTime;
+    if (!ctx || ctx.state !== 'running') return;
+    const now = ctx.currentTime;
 
-    // Nota 1
-    const o1 = c.createOscillator();
-    const g1 = c.createGain();
-    o1.type = 'sine';
-    o1.frequency.value = 1200;
-    g1.gain.setValueAtTime(0, now);
-    g1.gain.linearRampToValueAtTime(0.18, now + 0.04);
-    g1.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
-    o1.connect(g1); g1.connect(ctx.destination);
-    o1.start(now); o1.stop(now + 0.5);
+    function tone(freq, startOffset, peakVol, duration) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, now + startOffset);
+      gain.gain.linearRampToValueAtTime(peakVol, now + startOffset + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + startOffset + duration);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + startOffset);
+      osc.stop(now + startOffset + duration);
+    }
 
-    // Nota 2 (ligeiramente depois)
-    const o2 = c.createOscillator();
-    const g2 = c.createGain();
-    o2.type = 'sine';
-    o2.frequency.value = 1500;
-    g2.gain.setValueAtTime(0, now + 0.12);
-    g2.gain.linearRampToValueAtTime(0.13, now + 0.18);
-    g2.gain.exponentialRampToValueAtTime(0.001, now + 0.65);
-    o2.connect(g2); g2.connect(ctx.destination);
-    o2.start(now + 0.12); o2.stop(now + 0.65);
+    tone(1047, 0,    0.20, 0.55); // Do5
+    tone(1319, 0.18, 0.15, 0.55); // Mi5
   }
 
   function start() {
-    if (playing) return;
-    playing = true;
-    // Precisa resumir o contexto (politica de autoplay dos browsers)
-    getCtx();
-    if (ctx.state === 'suspended') ctx.resume();
+    if (active) return;
+    active = true;
     beep();
-    loopTimer = setInterval(beep, 3000); // repete a cada 3s
+    loopTimer = setInterval(beep, 3200);
   }
 
   function stop() {
-    playing = false;
+    active = false;
     clearInterval(loopTimer);
     loopTimer = null;
+  }
+
+  return { init, start, stop };
+})();
+
+// ─────────────────────────────────────────────────────────────
+// RING para a CRIADORA — via <audio> tag com data URI
+// O <audio> pode tocar via .play() desde que a pagina tenha
+// tido qualquer interacao antes (ex: login, clique nos botoes).
+// ─────────────────────────────────────────────────────────────
+const CriadoraRing = (() => {
+  let el = null;
+
+  // Gera o audio element com um beep suave em base64 (WAV 1s, 440Hz)
+  // para nao depender de arquivo externo
+  function getEl() {
+    if (el) return el;
+
+    // WAV minimo de 440Hz gerado em JS puro
+    const sampleRate = 44100;
+    const duration   = 0.8;
+    const freq       = 880;
+    const numSamples = Math.floor(sampleRate * duration);
+    const buffer     = new ArrayBuffer(44 + numSamples * 2);
+    const view       = new DataView(buffer);
+
+    function writeStr(offset, str) {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    }
+    writeStr(0,  'RIFF');
+    view.setUint32(4,  36 + numSamples * 2, true);
+    writeStr(8,  'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);            // PCM
+    view.setUint16(22, 1, true);            // mono
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, 'data');
+    view.setUint32(40, numSamples * 2, true);
+
+    for (let i = 0; i < numSamples; i++) {
+      // envelope: fade in 10%, sustain, fade out 30%
+      const t         = i / sampleRate;
+      const fadeIn    = Math.min(1, t / (duration * 0.10));
+      const fadeOut   = Math.max(0, 1 - (t - duration * 0.7) / (duration * 0.3));
+      const envelope  = fadeIn * fadeOut;
+      const sample    = Math.sin(2 * Math.PI * freq * t) * envelope * 0.25;
+      view.setInt16(44 + i * 2, Math.max(-32767, Math.min(32767, sample * 32767)), true);
+    }
+
+    const blob = new Blob([buffer], { type: 'audio/wav' });
+    const url  = URL.createObjectURL(blob);
+    el = new Audio(url);
+    el.loop   = true;
+    el.volume = 0.35;
+    return el;
+  }
+
+  function start() {
+    try { getEl().play().catch(() => {}); } catch {}
+  }
+
+  function stop() {
+    if (!el) return;
+    el.pause();
+    el.currentTime = 0;
   }
 
   return { start, stop };
 })();
 
 // Helpers
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
 async function getMedia() {
   const attempts = [
     { video: { width: 1280, height: 720, frameRate: 30, facingMode: 'user' }, audio: { echoCancellation: true, noiseSuppression: true } },
@@ -92,7 +154,7 @@ async function getMedia() {
   for (const c of attempts) {
     try { return await navigator.mediaDevices.getUserMedia(c); } catch {}
   }
-  throw new Error('Nao foi possivel acessar camera/microfone');
+  throw new Error('Sem acesso a camera/microfone');
 }
 
 function waitForIce(pc, ms = 4000) {
@@ -153,8 +215,13 @@ if (document.body.classList.contains('page-home')) {
       p => applyStatus(p.new.status))
     .subscribe();
 
+  // IMPORTANTE: callBtn.addEventListener deve ser SINCRONO no inicio
+  // para que Ring.init() crie o AudioContext dentro do user-gesture
   callBtn.addEventListener('click', async () => {
     callBtn.disabled = true;
+
+    // Cria AudioContext AGORA (ainda no user-gesture, antes de qualquer await)
+    Ring.init();
 
     try {
       localStream = await getMedia();
@@ -167,8 +234,6 @@ if (document.body.classList.contains('page-home')) {
     localVideo.srcObject = localStream;
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
-
-    // Inicia ring para o cliente
     Ring.start();
 
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -176,8 +241,8 @@ if (document.body.classList.contains('page-home')) {
 
     pc.ontrack = e => {
       if (e.streams && e.streams[0]) {
+        Ring.stop();
         remoteVideo.srcObject = e.streams[0];
-        Ring.stop(); // para o ring quando video remoto chegar
         callStatusMsg.textContent = 'Chamada em andamento';
       }
     };
@@ -194,7 +259,7 @@ if (document.body.classList.contains('page-home')) {
       }
     };
 
-    const offer = await pc.createOffer({ offerToReceiveAudio:true, offerToReceiveVideo:true });
+    const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
     await pc.setLocalDescription(offer);
     await waitForIce(pc);
 
@@ -212,32 +277,29 @@ if (document.body.classList.contains('page-home')) {
 
     realtimeCh = sb.channel('client-sig-' + callId)
       .on('postgres_changes', {
-        event:'UPDATE', schema:'public', table:'sinalizacao', filter:`id=eq.${callId}`
+        event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
       }, async p => {
         const r = p.new;
         if (r.status === 'active' && r.answer && pc.signalingState === 'have-local-offer') {
           try {
-            await pc.setRemoteDescription({ type:'answer', sdp: r.answer });
+            await pc.setRemoteDescription({ type: 'answer', sdp: r.answer });
             Ring.stop();
             callStatusMsg.textContent = 'Conectando video...';
-          } catch(e) { console.error('setRemoteDescription:', e); }
+          } catch (e) { console.error('setRemoteDescription:', e); }
         }
         if (r.status === 'rejected') {
           Ring.stop();
           callStatusMsg.textContent = 'Chamada nao atendida.';
           setTimeout(endCall, 2000);
         }
-        if (r.status === 'ended') {
-          Ring.stop();
-          endCall();
-        }
+        if (r.status === 'ended') { Ring.stop(); endCall(); }
       })
       .subscribe();
   });
 
   endCallBtn.addEventListener('click', async () => {
     Ring.stop();
-    if (callId) await sb.from('sinalizacao').update({ status:'ended' }).eq('id', callId);
+    if (callId) await sb.from('sinalizacao').update({ status: 'ended' }).eq('id', callId);
     endCall();
   });
 
@@ -289,6 +351,16 @@ if (document.body.classList.contains('page-criadora')) {
   let realtimeCh     = null;
   let incomingCallId = null;
   let listenCh       = null;
+
+  // Pre-aquece o audio ao primeiro clique em qualquer botao da pagina
+  // Isso garante que CriadoraRing.start() funcione mesmo vindo do Realtime
+  let audioWarmedUp = false;
+  document.addEventListener('click', () => {
+    if (audioWarmedUp) return;
+    audioWarmedUp = true;
+    const tmp = new Audio();
+    tmp.play().catch(() => {});
+  }, { once: true });
 
   async function init() {
     const { data: { session } } = await sb.auth.getSession();
@@ -391,14 +463,14 @@ if (document.body.classList.contains('page-criadora')) {
         if (row.status === 'calling' && row.offer) {
           incomingCallId = row.id;
           incomingSection.classList.remove('hidden');
-          Ring.start(); // toca ring para a criadora
+          CriadoraRing.start();
         }
       })
       .subscribe();
   }
 
   acceptCallBtn.addEventListener('click', async () => {
-    Ring.stop(); // para o ring ao atender
+    CriadoraRing.stop();
     incomingSection.classList.add('hidden');
     callId = incomingCallId;
     incomingCallId = null;
@@ -417,9 +489,7 @@ if (document.body.classList.contains('page-criadora')) {
     callStatusMsg.textContent = 'Conectando...';
 
     const { data: row } = await sb.from('sinalizacao')
-      .select('offer')
-      .eq('id', callId)
-      .single();
+      .select('offer').eq('id', callId).single();
 
     if (!row || !row.offer) {
       alert('Erro: oferta do cliente nao encontrada.');
@@ -447,7 +517,6 @@ if (document.body.classList.contains('page-criadora')) {
     };
 
     await pc.setRemoteDescription({ type: 'offer', sdp: row.offer });
-
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     await waitForIce(pc);
@@ -469,7 +538,7 @@ if (document.body.classList.contains('page-criadora')) {
   });
 
   rejectCallBtn.addEventListener('click', async () => {
-    Ring.stop();
+    CriadoraRing.stop();
     incomingSection.classList.add('hidden');
     if (incomingCallId) {
       await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', incomingCallId);
@@ -483,7 +552,7 @@ if (document.body.classList.contains('page-criadora')) {
   });
 
   function endCall() {
-    Ring.stop();
+    CriadoraRing.stop();
     if (realtimeCh) { sb.removeChannel(realtimeCh); realtimeCh = null; }
     if (pc)          { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
