@@ -116,16 +116,16 @@ const CriadoraRing = (() => {
 })();
 
 // ─────────────────────────────────────────────────────────────
-// Camera: Full HD vertical 9:16 (1080x1920)
+// Camera: Full HD horizontal 16:9 (1920x1080)
 // O browser tenta honrar o ideal; se o dispositivo nao suportar
 // entregara a resolucao maxima disponivel na mesma proporcao.
 // ─────────────────────────────────────────────────────────────
 async function getMedia() {
   return navigator.mediaDevices.getUserMedia({
     video: {
-      width:       { ideal: 1080 },
-      height:      { ideal: 1920 },
-      aspectRatio: { ideal: 9 / 16 },
+      width:       { ideal: 1920 },
+      height:      { ideal: 1080 },
+      aspectRatio: { ideal: 16 / 9 },
       frameRate:   { ideal: 30 },
       facingMode:  'user'
     },
