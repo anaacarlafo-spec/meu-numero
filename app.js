@@ -6,17 +6,29 @@ const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// STUN + TURN (Open Relay — gratuito, cobre conexoes internacionais)
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' }
+  {
+    urls:       'turn:openrelay.metered.ca:80',
+    username:   'openrelayproject',
+    credential: 'openrelayproject'
+  },
+  {
+    urls:       'turn:openrelay.metered.ca:443',
+    username:   'openrelayproject',
+    credential: 'openrelayproject'
+  },
+  {
+    urls:       'turn:openrelay.metered.ca:443?transport=tcp',
+    username:   'openrelayproject',
+    credential: 'openrelayproject'
+  }
 ];
 
 // ─────────────────────────────────────────────────────────────
 // RING — Web Audio API (cliente)
-// Toca UMA VEZ ao entrar na chamada. Sem loop.
-// Ring.init() deve ser chamado SINCRONAMENTE no click handler.
 // ─────────────────────────────────────────────────────────────
 const Ring = (() => {
   let ctx = null;
@@ -29,7 +41,7 @@ const Ring = (() => {
 
   function tone(freq, startOffset, peakVol, duration) {
     if (!ctx || ctx.state !== 'running') return;
-    const now = ctx.currentTime;
+    const now  = ctx.currentTime;
     const osc  = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
@@ -54,14 +66,13 @@ const Ring = (() => {
 })();
 
 // ─────────────────────────────────────────────────────────────
-// RING para a CRIADORA — via <audio> com WAV gerado em JS
+// RING para a CRIADORA — via <audio> WAV gerado em JS
 // ─────────────────────────────────────────────────────────────
 const CriadoraRing = (() => {
   let el = null;
 
   function getEl() {
     if (el) return el;
-
     const sampleRate = 44100;
     const duration   = 0.8;
     const freq       = 880;
@@ -116,9 +127,7 @@ const CriadoraRing = (() => {
 })();
 
 // ─────────────────────────────────────────────────────────────
-// Camera: Full HD horizontal 16:9 (1920x1080)
-// O browser tenta honrar o ideal; se o dispositivo nao suportar
-// entregara a resolucao maxima disponivel na mesma proporcao.
+// Captura de midia: Full HD 16:9
 // ─────────────────────────────────────────────────────────────
 async function getMedia() {
   return navigator.mediaDevices.getUserMedia({
@@ -136,14 +145,38 @@ async function getMedia() {
   });
 }
 
-function waitForIce(pc, ms = 4000) {
-  return new Promise(resolve => {
-    if (pc.iceGatheringState === 'complete') { resolve(); return; }
-    const t = setTimeout(resolve, ms);
-    pc.onicegatheringstatechange = () => {
-      if (pc.iceGatheringState === 'complete') { clearTimeout(t); resolve(); }
-    };
+// ─────────────────────────────────────────────────────────────
+// Trickle ICE helpers
+// ─────────────────────────────────────────────────────────────
+async function sendIceCandidate(callId, role, candidate) {
+  if (!candidate) return;
+  await sb.from('ice_candidates').insert({
+    call_id:   callId,
+    role:      role,
+    candidate: JSON.stringify(candidate)
   });
+}
+
+function listenIceCandidates(callId, peerRole, pc, channelRef) {
+  // peerRole = papel de quem ENVIOU os candidatos que queremos receber
+  const ch = sb.channel('ice-' + callId + '-' + peerRole)
+    .on('postgres_changes', {
+      event:  'INSERT',
+      schema: 'public',
+      table:  'ice_candidates',
+      filter: `call_id=eq.${callId}`
+    }, async payload => {
+      const row = payload.new;
+      if (row.role !== peerRole) return; // so candidatos do outro lado
+      try {
+        const cand = JSON.parse(row.candidate);
+        if (pc && pc.remoteDescription && cand && cand.candidate) {
+          await pc.addIceCandidate(new RTCIceCandidate(cand));
+        }
+      } catch (e) { console.warn('addIceCandidate:', e); }
+    })
+    .subscribe();
+  channelRef.push(ch);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -166,7 +199,7 @@ if (document.body.classList.contains('page-home')) {
   let localStream = null;
   let pc          = null;
   let callId      = null;
-  let realtimeCh  = null;
+  let channels    = [];   // todos os canais realtime desta chamada
 
   async function loadPerfil() {
     const { data } = await sb.from('perfil').select('nome,foto_url,status').eq('id',1).single();
@@ -211,9 +244,11 @@ if (document.body.classList.contains('page-home')) {
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
     Ring.start();
 
+    // Criar PeerConnection ANTES de gravar oferta
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
+    // Receber video/audio da criadora
     pc.ontrack = e => {
       if (e.streams && e.streams[0]) {
         remoteVideo.srcObject = e.streams[0];
@@ -222,17 +257,19 @@ if (document.body.classList.contains('page-home')) {
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') callStatusMsg.textContent = 'Chamada em andamento';
+      if (pc.connectionState === 'connected')
+        callStatusMsg.textContent = 'Chamada em andamento';
       if (pc.connectionState === 'failed') {
         callStatusMsg.textContent = 'Falha na conexao. Tente novamente.';
         setTimeout(endCall, 3000);
       }
     };
 
+    // Criar oferta SEM esperar ICE completo (trickle)
     const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
     await pc.setLocalDescription(offer);
-    await waitForIce(pc);
 
+    // Gravar chamada no banco
     const { data: row, error } = await sb.from('sinalizacao')
       .insert({ role: 'client', status: 'calling', offer: pc.localDescription.sdp })
       .select('id').single();
@@ -244,7 +281,16 @@ if (document.body.classList.contains('page-home')) {
     }
     callId = row.id;
 
-    realtimeCh = sb.channel('client-sig-' + callId)
+    // Enviar candidatos ICE do cliente assim que forem gerados
+    pc.onicecandidate = e => {
+      if (e.candidate) sendIceCandidate(callId, 'client', e.candidate);
+    };
+
+    // Escutar candidatos ICE da criadora
+    listenIceCandidates(callId, 'criadora', pc, channels);
+
+    // Escutar answer da criadora e status da chamada
+    const sigCh = sb.channel('client-sig-' + callId)
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
       }, async p => {
@@ -253,7 +299,7 @@ if (document.body.classList.contains('page-home')) {
           try {
             await pc.setRemoteDescription({ type: 'answer', sdp: r.answer });
             callStatusMsg.textContent = 'Conectando video...';
-          } catch (e) { console.error('setRemoteDescription:', e); }
+          } catch (e) { console.error('setRemoteDescription (cliente):', e); }
         }
         if (r.status === 'rejected') {
           callStatusMsg.textContent = 'Chamada nao atendida.';
@@ -262,6 +308,7 @@ if (document.body.classList.contains('page-home')) {
         if (r.status === 'ended') endCall();
       })
       .subscribe();
+    channels.push(sigCh);
   });
 
   endCallBtn.addEventListener('click', async () => {
@@ -270,7 +317,8 @@ if (document.body.classList.contains('page-home')) {
   });
 
   function endCall() {
-    if (realtimeCh) { sb.removeChannel(realtimeCh); realtimeCh = null; }
+    channels.forEach(ch => sb.removeChannel(ch));
+    channels = [];
     if (pc)          { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
     localVideo.srcObject  = null;
@@ -313,9 +361,9 @@ if (document.body.classList.contains('page-criadora')) {
   let localStream    = null;
   let pc             = null;
   let callId         = null;
-  let realtimeCh     = null;
   let incomingCallId = null;
   let listenCh       = null;
+  let channels       = [];
 
   document.addEventListener('click', () => {
     const tmp = new Audio();
@@ -448,6 +496,7 @@ if (document.body.classList.contains('page-criadora')) {
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Conectando...';
 
+    // Buscar oferta do cliente
     const { data: row } = await sb.from('sinalizacao')
       .select('offer').eq('id', callId).single();
 
@@ -458,9 +507,13 @@ if (document.body.classList.contains('page-criadora')) {
       return;
     }
 
+    // Criar PeerConnection
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+    // Adicionar todas as tracks da criadora (video + audio)
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
+    // Receber video/audio do cliente
     pc.ontrack = e => {
       if (e.streams && e.streams[0]) {
         remoteVideo.srcObject = e.streams[0];
@@ -469,32 +522,60 @@ if (document.body.classList.contains('page-criadora')) {
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') callStatusMsg.textContent = 'Chamada em andamento';
+      if (pc.connectionState === 'connected')
+        callStatusMsg.textContent = 'Chamada em andamento';
       if (pc.connectionState === 'failed') {
         callStatusMsg.textContent = 'Falha na conexao.';
         setTimeout(endCall, 3000);
       }
     };
 
+    // Definir oferta do cliente como remota
     await pc.setRemoteDescription({ type: 'offer', sdp: row.offer });
+
+    // Criar answer SEM esperar ICE completo (trickle)
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    await waitForIce(pc);
 
+    // Gravar answer no banco imediatamente
     await sb.from('sinalizacao').update({
       answer: pc.localDescription.sdp,
       status: 'active'
     }).eq('id', callId);
 
+    // Enviar candidatos ICE da criadora assim que forem gerados
+    pc.onicecandidate = e => {
+      if (e.candidate) sendIceCandidate(callId, 'criadora', e.candidate);
+    };
+
+    // Escutar candidatos ICE do cliente
+    listenIceCandidates(callId, 'client', pc, channels);
+
+    // Aplicar candidatos ICE do cliente que ja chegaram antes de atender
+    const { data: existingCandidates } = await sb.from('ice_candidates')
+      .select('candidate').eq('call_id', callId).eq('role', 'client');
+
+    if (existingCandidates) {
+      for (const row of existingCandidates) {
+        try {
+          const cand = JSON.parse(row.candidate);
+          if (cand && cand.candidate)
+            await pc.addIceCandidate(new RTCIceCandidate(cand));
+        } catch {}
+      }
+    }
+
     callStatusMsg.textContent = 'Chamada em andamento';
 
-    realtimeCh = sb.channel('criadora-sig-' + callId)
+    // Monitorar encerramento
+    const sigCh = sb.channel('criadora-sig-' + callId)
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
       }, p => {
         if (p.new.status === 'ended') endCall();
       })
       .subscribe();
+    channels.push(sigCh);
   });
 
   rejectCallBtn.addEventListener('click', async () => {
@@ -513,7 +594,8 @@ if (document.body.classList.contains('page-criadora')) {
 
   function endCall() {
     CriadoraRing.stop();
-    if (realtimeCh) { sb.removeChannel(realtimeCh); realtimeCh = null; }
+    channels.forEach(ch => sb.removeChannel(ch));
+    channels = [];
     if (pc)          { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
     localVideo.srcObject  = null;
