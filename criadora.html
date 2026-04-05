@@ -34,11 +34,30 @@
   <!-- DASHBOARD -->
   <div id="dashboardScreen" class="dashboard hidden">
 
+    <!-- Header fixo -->
     <header class="dash-header">
       <span class="dash-logo">Meu Número</span>
       <button id="logoutBtn" class="btn-ghost">Sair</button>
     </header>
 
+    <!-- Banner de chamada entrante: fixo logo abaixo do header, FORA do main -->
+    <div id="incomingSection" class="incoming-banner hidden">
+      <div class="incoming-banner-inner">
+        <div class="incoming-banner-info">
+          <span class="incoming-banner-icon">📞</span>
+          <div>
+            <p class="incoming-banner-title">Chamada entrante</p>
+            <p class="incoming-banner-sub">Um cliente quer falar com você</p>
+          </div>
+        </div>
+        <div class="incoming-banner-actions">
+          <button id="acceptCallBtn" class="btn-accept">Atender</button>
+          <button id="rejectCallBtn" class="btn-reject">Recusar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Conteúdo do dashboard -->
     <main class="dash-main">
 
       <section class="dash-section">
@@ -70,25 +89,6 @@
         </div>
         <p id="statusFeedback" class="status-feedback">Você está offline. Clientes não podem ligar.</p>
       </section>
-
-      <!-- Chamada entrante -->
-      <div id="incomingSection" class="hidden">
-        <div class="incoming-banner">
-          <div class="incoming-banner-inner">
-            <div class="incoming-banner-info">
-              <span class="incoming-banner-icon">📞</span>
-              <div>
-                <p class="incoming-banner-title">Chamada entrante</p>
-                <p class="incoming-banner-sub">Um cliente quer falar com você</p>
-              </div>
-            </div>
-            <div class="incoming-banner-actions">
-              <button id="acceptCallBtn" class="btn-accept">Atender</button>
-              <button id="rejectCallBtn" class="btn-reject">Recusar</button>
-            </div>
-          </div>
-        </div>
-      </div>
 
     </main>
   </div>
