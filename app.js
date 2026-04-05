@@ -8,25 +8,52 @@ const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
-  realtime: { params: { eventsPerSecond: 40 } }  // mais eventos por segundo no canal realtime
+  realtime: { params: { eventsPerSecond: 40 } }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ICE Servers — STUN públicos estáveis (Google + Cloudflare)
+// ICE Servers
+// Estratégia em camadas:
+//   1. STUN do Google/Cloudflare — funciona em ~85% das redes (rápido, sem custo)
+//   2. TURN via UDP (fréeice.net) — cobre NAT simétrico e firewalls corporativos
+//   3. TURN via TCP 443 (fréeice.net) — último recurso: atravessa até proxies HTTPS
+//
+// freeturn.net e numb.viagenie.ca foram descontinuados.
+// freestun.net/freeice.net são ativos e gratuitos em 2025-2026.
 // ─────────────────────────────────────────────────────────────────────────────
 const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
+  // — STUN (resolução de IP público, sem relay) —
+  { urls: 'stun:stun.l.google.com:19302'  },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' }
+  { urls: 'stun:stun.cloudflare.com:3478' },
+
+  // — TURN UDP — atravessa a maioria dos NATs fora do Brasil —
+  {
+    urls:       'turn:freestun.net:3478',
+    username:   'free',
+    credential: 'free'
+  },
+  // TURN UDP alternativo (porta diferente, maior chance de passar em firewalls)
+  {
+    urls:       'turn:freestun.net:5350',
+    username:   'free',
+    credential: 'free'
+  },
+
+  // — TURN TCP 443 — último recurso: atravessa proxies HTTPS e redes corporativas —
+  {
+    urls:       'turns:freestun.net:5349',
+    username:   'free',
+    credential: 'free'
+  }
 ];
 
-// Config WebRTC — pool alto para coleta antecipada de candidatos
+// Config WebRTC
 const PC_CONFIG = {
-  iceServers: ICE_SERVERS,
-  iceCandidatePoolSize: 4,    // pré-coleta candidatos antes do offer/answer
-  bundlePolicy: 'max-bundle', // áudio + vídeo num único componente ICE
-  rtcpMuxPolicy: 'require'    // reduz portas e acelera negociação
+  iceServers:         ICE_SERVERS,
+  iceCandidatePoolSize: 4,
+  bundlePolicy:       'max-bundle',
+  rtcpMuxPolicy:      'require'
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -156,7 +183,6 @@ let flushScheduled    = false;
 let currentCallId     = null;
 let currentRole       = null;
 
-// Acumula candidatos e envia em lote a cada 80ms (trickle batching)
 function scheduleFlush() {
   if (flushScheduled) return;
   flushScheduled = true;
@@ -171,14 +197,8 @@ function scheduleFlush() {
 
 function queueCandidate(candidate) {
   if (!candidate) return;
-  if (currentCallId) {
-    // já temos callId: envia em lote
-    pendingCandidates.push(candidate);
-    scheduleFlush();
-  } else {
-    // ainda sem callId: guarda para enviar depois
-    pendingCandidates.push(candidate);
-  }
+  pendingCandidates.push(candidate);
+  if (currentCallId) scheduleFlush();
 }
 
 async function flushPending() {
@@ -188,7 +208,6 @@ async function flushPending() {
   await sb.from('ice_candidates').insert(rows);
 }
 
-// Aplica candidatos remotos em paralelo (Promise.all)
 async function applyRemoteCandidates(pc, rows) {
   await Promise.all(
     (rows || []).map(async r => {
@@ -268,10 +287,8 @@ if (document.body.classList.contains('page-home')) {
     callBtn.disabled = true;
     Ring.init();
 
-    // Inicia câmera + PeerConnection em paralelo
     let mediaPromise = getMedia();
 
-    // Cria PC imediatamente para pré-coletar candidatos ICE
     pc = new RTCPeerConnection(PC_CONFIG);
     currentRole = 'client';
     currentCallId = null;
@@ -309,11 +326,9 @@ if (document.body.classList.contains('page-home')) {
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
     Ring.start();
 
-    // Cria offer
     const offer = await pc.createOffer({ offerToReceiveAudio:true, offerToReceiveVideo:true });
     await pc.setLocalDescription(offer);
 
-    // Insere na sinalizacao com o offer já embutido
     const { data: row, error } = await sb.from('sinalizacao')
       .insert({ role:'client', status:'calling', offer: pc.localDescription.sdp })
       .select('id').single();
@@ -326,7 +341,6 @@ if (document.body.classList.contains('page-home')) {
     callId = row.id;
     currentCallId = callId;
 
-    // Envia candidatos acumulados durante a criação do offer
     await flushPending();
     listenIceCandidates(callId, 'criadora', pc, channels);
 
@@ -399,7 +413,7 @@ if (document.body.classList.contains('page-criadora')) {
   const callStatusMsg   = document.getElementById('callStatusMsg');
 
   let localStream = null, pc = null, callId = null;
-  let incomingCallId = null, incomingOffer = null; // guarda offer junto com o ID
+  let incomingCallId = null, incomingOffer = null;
   let listenCh = null, channels = [];
 
   async function init() {
@@ -507,10 +521,9 @@ if (document.body.classList.contains('page-criadora')) {
     listenCh = sb.channel('criadora-incoming')
       .on('postgres_changes', { event:'INSERT', schema:'public', table:'sinalizacao' }, payload => {
         const row = payload.new;
-        // O offer já vem junto com o evento INSERT — sem SELECT extra!
         if (row.status === 'calling' && row.offer) {
           incomingCallId = row.id;
-          incomingOffer  = row.offer; // guarda aqui para usar direto no atender
+          incomingOffer  = row.offer;
           incomingSection.classList.remove('hidden');
           CriadoraRing.start();
         }
@@ -527,18 +540,16 @@ if (document.body.classList.contains('page-criadora')) {
     CriadoraRing.stop();
     incomingSection.classList.add('hidden');
     callId = incomingCallId;
-    const offerSdp = incomingOffer; // usa o offer já em memória — sem round-trip!
+    const offerSdp = incomingOffer;
     incomingCallId = null;
     incomingOffer  = null;
 
-    // Inicia câmera e PeerConnection em paralelo
     currentRole = 'criadora';
     currentCallId = callId;
     pendingCandidates = [];
 
     let mediaPromise = getMedia();
 
-    // Cria PC imediatamente
     pc = new RTCPeerConnection(PC_CONFIG);
 
     pc.onicecandidate = e => { if (e.candidate) queueCandidate(e.candidate); };
@@ -558,12 +569,10 @@ if (document.body.classList.contains('page-criadora')) {
       }
     };
 
-    // Aplica o remote description imediatamente (offer já está em memória)
     await pc.setRemoteDescription({ type:'offer', sdp: offerSdp });
 
-    // Busca candidatos ICE já existentes do cliente E aguarda a câmera — em paralelo
     const [_, existingIce, localStream_] = await Promise.all([
-      Promise.resolve(), // placeholder
+      Promise.resolve(),
       sb.from('ice_candidates').select('candidate').eq('call_id', callId).eq('role', 'client'),
       mediaPromise
     ]);
@@ -580,17 +589,13 @@ if (document.body.classList.contains('page-criadora')) {
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Conectando...';
 
-    // Aplica candidatos existentes do cliente em paralelo
     if (existingIce.data) await applyRemoteCandidates(pc, existingIce.data);
 
-    // Escuta novos candidatos do cliente em tempo real
     listenIceCandidates(callId, 'client', pc, channels);
 
-    // Cria answer
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
-    // Envia candidatos acumulados + answer em paralelo
     await Promise.all([
       sb.from('sinalizacao').update({ answer: pc.localDescription.sdp, status:'active' }).eq('id', callId),
       flushPending()
