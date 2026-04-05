@@ -129,8 +129,7 @@
     const { createClient } = supabase;
     const sbPush = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-    // VAPID public key — substitua após gerar em vapidkeys.com
-    const VAPID_PUBLIC_KEY = 'COLE_AQUI_SUA_CHAVE_PUBLICA_VAPID';
+    const VAPID_PUBLIC_KEY = 'BC7bEb4OLBQz1eW0rbYI3_ITHgXVHvGrt2iYCKZtcri5YQKCs66K3xc2BUSohV-avLFKn1bceF9IyA_fJAm8nb4';
 
     let swReg = null;
 
@@ -152,14 +151,12 @@
 
     async function subscribePush() {
       if (!swReg) return;
-      if (VAPID_PUBLIC_KEY === 'COLE_AQUI_SUA_CHAVE_PUBLICA_VAPID') return;
       try {
         const existing = await swReg.pushManager.getSubscription();
         const sub = existing || await swReg.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
         });
-        // Salva subscription no Supabase (tabela perfil_push)
         await sbPush.from('perfil_push').upsert({
           perfil_id: 1,
           endpoint:  sub.endpoint,
@@ -202,7 +199,6 @@
       }
     });
 
-    // Fallback foreground: se app estiver visível, o toque já roda pelo app.js
     window.notifyIncomingCall = function () {
       if (document.visibilityState === 'visible') return;
       if (navigator.serviceWorker && navigator.serviceWorker.controller) {
