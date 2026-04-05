@@ -1,23 +1,17 @@
 'use strict';
 
-// ─────────────────────────────────────────────────────────────
-// Lê credenciais Supabase das meta tags injetadas pelo Vercel
-// ─────────────────────────────────────────────────────────────
-function getMeta(name) {
-  const el = document.querySelector(`meta[name="${name}"]`);
-  return el ? el.getAttribute('content') : null;
-}
-
-const SUPABASE_URL = getMeta('supabase-url') || 'https://decuqgobcbuwgkaesbvo.supabase.co';
-const SUPABASE_KEY = getMeta('supabase-key') || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRlY3VxZ29iY2J1d2drYWVzYnZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUzMTEzMTAsImV4cCI6MjA5MDg4NzMxMH0.DbMHj0K36zwOqdfo_y1q3R7HJKHkTzHn2j-BIJIkkiQ';
+// ─────────────────────────────────────────────────────────────────────────────
+// Supabase — anon key é pública por design (segurança via RLS no banco)
+// ─────────────────────────────────────────────────────────────────────────────
+const SUPABASE_URL = 'https://decuqgobcbuwgkaesbvo.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRlY3VxZ29iY2J1d2drYWVzYnZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUzMTEzMTAsImV4cCI6MjA5MDg4NzMxMH0.DbMHj0K36zwOqdfo_y1q3R7HJKHkTzHn2j-BIJIkkiQ';
 
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ─────────────────────────────────────────────────────────────
-// ICE Servers — STUN públicos do Google + Cloudflare
-// (openrelay foi descontinuado; TURN gratuito removido para evitar falhas)
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// ICE Servers — STUN públicos estáveis (Google + Cloudflare)
+// ─────────────────────────────────────────────────────────────────────────────
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
@@ -27,9 +21,9 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.cloudflare.com:3478' }
 ];
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // RING — Web Audio API (cliente)
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 const Ring = (() => {
   let ctx = null;
   let intervalId = null;
@@ -74,9 +68,9 @@ const Ring = (() => {
   return { init, start, stop };
 })();
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // RING para a CRIADORA — WAV gerado via PCM
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 const CriadoraRing = (() => {
   let audioEl = null;
   let blobUrl  = null;
@@ -148,9 +142,9 @@ const CriadoraRing = (() => {
   return { unlock, start, stop };
 })();
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // getUserMedia
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 async function getMedia() {
   return navigator.mediaDevices.getUserMedia({
     video: { width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:30}, facingMode:'user' },
@@ -158,9 +152,9 @@ async function getMedia() {
   });
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 // Trickle ICE helpers
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 let pendingCandidates = [];
 
 async function flushPendingCandidates(callId, role) {
@@ -194,9 +188,9 @@ function listenIceCandidates(callId, peerRole, pc, channelRef) {
   channelRef.push(ch);
 }
 
-// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 // HOME — página pública (cliente)
-// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 if (document.body.classList.contains('page-home')) {
 
   const creatorPhoto  = document.getElementById('creatorPhoto');
@@ -212,13 +206,19 @@ if (document.body.classList.contains('page-home')) {
   const callStatusMsg = document.getElementById('callStatusMsg');
 
   let localStream = null, pc = null, callId = null, channels = [];
-  let ringInterval = null;
 
   async function loadPerfil() {
-    const { data } = await sb.from('perfil').select('nome,foto_url,status').eq('id',1).single();
+    const { data, error } = await sb.from('perfil').select('nome,foto_url,status').eq('id',1).single();
+    if (error) {
+      console.error('Erro ao carregar perfil:', error);
+      creatorName.textContent = 'Offline';
+      return;
+    }
     if (!data) return;
     creatorName.textContent = data.nome || 'Criadora';
-    if (data.foto_url) creatorPhoto.src = data.foto_url;
+    if (data.foto_url) {
+      creatorPhoto.src = data.foto_url;
+    }
     applyStatus(data.status);
   }
 
@@ -350,9 +350,9 @@ if (document.body.classList.contains('page-home')) {
   }
 }
 
-// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 // PAINEL DA CRIADORA
-// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 if (document.body.classList.contains('page-criadora')) {
 
   const loginScreen     = document.getElementById('loginScreen');
@@ -563,7 +563,6 @@ if (document.body.classList.contains('page-criadora')) {
 
     await pc.setRemoteDescription({ type:'offer', sdp: sigRow.offer });
 
-    // Aplica candidatos ICE do cliente que já chegaram
     const { data: existing } = await sb.from('ice_candidates')
       .select('candidate')
       .eq('call_id', callId)
