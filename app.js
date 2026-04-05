@@ -48,46 +48,88 @@ const Ring = (() => {
 })();
 
 // ─────────────────────────────────────────────────────────────
-// RING para a CRIADORA
+// RING para a CRIADORA — WAV gerado via PCM
 // ─────────────────────────────────────────────────────────────
 const CriadoraRing = (() => {
-  let el = null;
-  function getEl() {
-    if (el) return el;
+  let audioEl = null;
+  let blobUrl  = null;
+  let unlocked = false;
+
+  // Gera blob WAV uma única vez
+  function buildBlobUrl() {
+    if (blobUrl) return blobUrl;
     const sampleRate = 44100, duration = 0.8, freq = 880;
     const numSamples = Math.floor(sampleRate * duration);
     const buffer = new ArrayBuffer(44 + numSamples * 2);
     const view = new DataView(buffer);
-    function writeStr(offset, str) {
-      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-    }
-    writeStr(0, 'RIFF'); view.setUint32(4, 36 + numSamples * 2, true);
-    writeStr(8, 'WAVE'); writeStr(12, 'fmt ');
-    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true); view.setUint16(34, 16, true);
-    writeStr(36, 'data'); view.setUint32(40, numSamples * 2, true);
+    function ws(offset, str) { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); }
+    ws(0,'RIFF'); view.setUint32(4, 36 + numSamples*2, true);
+    ws(8,'WAVE'); ws(12,'fmt ');
+    view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true);
+    view.setUint32(24,sampleRate,true); view.setUint32(28,sampleRate*2,true);
+    view.setUint16(32,2,true); view.setUint16(34,16,true);
+    ws(36,'data'); view.setUint32(40,numSamples*2,true);
     for (let i = 0; i < numSamples; i++) {
       const t = i / sampleRate;
-      const env = Math.min(1, t / (duration * 0.10)) * Math.max(0, 1 - (t - duration * 0.7) / (duration * 0.3));
-      const sample = Math.sin(2 * Math.PI * freq * t) * env * 0.25;
-      view.setInt16(44 + i * 2, Math.max(-32767, Math.min(32767, sample * 32767)), true);
+      const env = Math.min(1, t/(duration*0.10)) * Math.max(0, 1-(t-duration*0.7)/(duration*0.3));
+      const sample = Math.sin(2*Math.PI*freq*t) * env * 0.25;
+      view.setInt16(44 + i*2, Math.max(-32767, Math.min(32767, sample*32767)), true);
     }
     const blob = new Blob([buffer], { type: 'audio/wav' });
-    el = new Audio(URL.createObjectURL(blob));
-    el.loop = true; el.volume = 0.35;
-    return el;
+    blobUrl = URL.createObjectURL(blob);
+    return blobUrl;
   }
-  function start() { try { getEl().play().catch(() => {}); } catch {} }
-  function stop() { if (!el) return; el.pause(); el.currentTime = 0; }
-  return { start, stop };
+
+  // Deve ser chamado em resposta a um toque do utilizador (ex: clicar em Online)
+  // Cria o elemento Audio e toca silenciosamente para desbloquear o iOS
+  function unlock() {
+    if (unlocked) return;
+    const url = buildBlobUrl();
+    audioEl = new Audio(url);
+    audioEl.loop   = true;
+    audioEl.volume = 0;          // silencioso — só para desbloquear
+    const p = audioEl.play();
+    if (p && p.then) {
+      p.then(() => {
+        audioEl.pause();
+        audioEl.currentTime = 0;
+        audioEl.volume = 0.5;    // restaura volume real
+        unlocked = true;
+      }).catch(() => {});
+    } else {
+      audioEl.pause();
+      audioEl.currentTime = 0;
+      audioEl.volume = 0.5;
+      unlocked = true;
+    }
+  }
+
+  function start() {
+    if (!audioEl) {
+      // fallback: tenta criar sem desbloqueio prévio
+      audioEl = new Audio(buildBlobUrl());
+      audioEl.loop   = true;
+      audioEl.volume = 0.5;
+    }
+    audioEl.currentTime = 0;
+    audioEl.volume = 0.5;
+    audioEl.play().catch(() => {});
+  }
+
+  function stop() {
+    if (!audioEl) return;
+    audioEl.pause();
+    audioEl.currentTime = 0;
+  }
+
+  return { unlock, start, stop };
 })();
 
 // ─────────────────────────────────────────────────────────────
 async function getMedia() {
   return navigator.mediaDevices.getUserMedia({
-    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, aspectRatio: { ideal: 16/9 }, frameRate: { ideal: 30 }, facingMode: 'user' },
-    audio: { echoCancellation: true, noiseSuppression: true }
+    video: { width:{ideal:1920}, height:{ideal:1080}, aspectRatio:{ideal:16/9}, frameRate:{ideal:30}, facingMode:'user' },
+    audio: { echoCancellation:true, noiseSuppression:true }
   });
 }
 
@@ -202,11 +244,11 @@ if (document.body.classList.contains('page-home')) {
       else pendingCandidates.push(e.candidate);
     };
 
-    const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+    const offer = await pc.createOffer({ offerToReceiveAudio:true, offerToReceiveVideo:true });
     await pc.setLocalDescription(offer);
 
     const { data: row, error } = await sb.from('sinalizacao')
-      .insert({ role: 'client', status: 'calling', offer: pc.localDescription.sdp })
+      .insert({ role:'client', status:'calling', offer: pc.localDescription.sdp })
       .select('id').single();
 
     if (error || !row) { alert('Erro ao iniciar chamada. Tente novamente.'); endCall(); return; }
@@ -217,11 +259,11 @@ if (document.body.classList.contains('page-home')) {
 
     const sigCh = sb.channel('client-sig-' + callId)
       .on('postgres_changes', {
-        event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
+        event:'UPDATE', schema:'public', table:'sinalizacao', filter:`id=eq.${callId}`
       }, async p => {
         const r = p.new;
         if (r.status === 'active' && r.answer && pc.signalingState === 'have-local-offer') {
-          try { await pc.setRemoteDescription({ type: 'answer', sdp: r.answer }); callStatusMsg.textContent = 'Conectando video...'; }
+          try { await pc.setRemoteDescription({ type:'answer', sdp:r.answer }); callStatusMsg.textContent = 'Conectando video...'; }
           catch (e) { console.error('setRemoteDescription (cliente):', e); }
         }
         if (r.status === 'rejected') { callStatusMsg.textContent = 'Chamada nao atendida.'; setTimeout(endCall, 2000); }
@@ -232,7 +274,7 @@ if (document.body.classList.contains('page-home')) {
   });
 
   endCallBtn.addEventListener('click', async () => {
-    if (callId) await sb.from('sinalizacao').update({ status: 'ended' }).eq('id', callId);
+    if (callId) await sb.from('sinalizacao').update({ status:'ended' }).eq('id', callId);
     endCall();
   });
 
@@ -277,8 +319,6 @@ if (document.body.classList.contains('page-criadora')) {
   const callStatusMsg   = document.getElementById('callStatusMsg');
 
   let localStream = null, pc = null, callId = null, incomingCallId = null, listenCh = null, channels = [];
-
-  document.addEventListener('click', () => { const tmp = new Audio(); tmp.play().catch(() => {}); }, { once: true });
 
   async function init() {
     const { data: { session } } = await sb.auth.getSession();
@@ -329,10 +369,14 @@ if (document.body.classList.contains('page-criadora')) {
     const on = s === 'online';
     btnOnline.classList.toggle('active', on);
     btnOffline.classList.toggle('active', !on);
-    statusFeedback.textContent = on ? 'Voce esta online. Pode receber chamadas.' : 'Voce esta offline. Clientes nao podem ligar.';
+    statusFeedback.textContent = on
+      ? 'Voce esta online. Pode receber chamadas.'
+      : 'Voce esta offline. Clientes nao podem ligar.';
   }
 
   async function setStatus(s) {
+    // Desbloqueia áudio do iOS no mesmo gesto de toque
+    if (s === 'online') CriadoraRing.unlock();
     await sb.from('perfil').update({ status: s }).eq('id', 1);
     applyStatusUI(s);
   }
@@ -345,7 +389,7 @@ if (document.body.classList.contains('page-criadora')) {
     if (!file) return;
     const ext = file.name.split('.').pop();
     const path = `criadora/foto.${ext}`;
-    const { error: upErr } = await sb.storage.from('fotos').upload(path, file, { upsert: true });
+    const { error: upErr } = await sb.storage.from('fotos').upload(path, file, { upsert:true });
     if (upErr) { alert('Erro ao enviar foto.'); return; }
     const { data: urlData } = sb.storage.from('fotos').getPublicUrl(path);
     const url = urlData.publicUrl;
@@ -362,12 +406,10 @@ if (document.body.classList.contains('page-criadora')) {
     setTimeout(() => nameFeedback.classList.add('hidden'), 2000);
   });
 
-  // ✅ Cancela o toque/banner se o cliente desligar antes de atender
   function cancelIncoming() {
     CriadoraRing.stop();
     incomingSection.classList.add('hidden');
     incomingCallId = null;
-    // Fecha notificacao do SW se ainda estiver visivel
     if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
       navigator.serviceWorker.controller.postMessage({ type: 'CLOSE_NOTIFICATION' });
     }
@@ -376,9 +418,8 @@ if (document.body.classList.contains('page-criadora')) {
   function startListening() {
     if (listenCh) sb.removeChannel(listenCh);
     listenCh = sb.channel('criadora-incoming')
-      // Nova chamada chegando
       .on('postgres_changes', {
-        event: 'INSERT', schema: 'public', table: 'sinalizacao'
+        event:'INSERT', schema:'public', table:'sinalizacao'
       }, payload => {
         const row = payload.new;
         if (row.status === 'calling' && row.offer) {
@@ -388,12 +429,10 @@ if (document.body.classList.contains('page-criadora')) {
           if (typeof window.notifyIncomingCall === 'function') window.notifyIncomingCall();
         }
       })
-      // ✅ Cliente cancelou/desligou antes de atender
       .on('postgres_changes', {
-        event: 'UPDATE', schema: 'public', table: 'sinalizacao'
+        event:'UPDATE', schema:'public', table:'sinalizacao'
       }, payload => {
         const row = payload.new;
-        // So nos importa a chamada que esta tocando (nao atendida ainda)
         if (row.id === incomingCallId && (row.status === 'ended' || row.status === 'rejected')) {
           cancelIncoming();
         }
@@ -410,7 +449,7 @@ if (document.body.classList.contains('page-criadora')) {
     try { localStream = await getMedia(); }
     catch {
       alert('Autorize camera e microfone para atender.');
-      await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', callId);
+      await sb.from('sinalizacao').update({ status:'rejected' }).eq('id', callId);
       callId = null; return;
     }
 
@@ -421,7 +460,7 @@ if (document.body.classList.contains('page-criadora')) {
     const { data: sigRow } = await sb.from('sinalizacao').select('offer').eq('id', callId).single();
     if (!sigRow || !sigRow.offer) {
       alert('Erro: oferta do cliente nao encontrada.');
-      await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', callId);
+      await sb.from('sinalizacao').update({ status:'rejected' }).eq('id', callId);
       endCall(); return;
     }
 
@@ -439,7 +478,7 @@ if (document.body.classList.contains('page-criadora')) {
     pc.onicecandidate = e => { if (e.candidate) sendIceCandidate(callId, 'criadora', e.candidate); };
     listenIceCandidates(callId, 'client', pc, channels);
 
-    await pc.setRemoteDescription({ type: 'offer', sdp: sigRow.offer });
+    await pc.setRemoteDescription({ type:'offer', sdp: sigRow.offer });
 
     const { data: existing } = await sb.from('ice_candidates').select('candidate').eq('call_id', callId).eq('role', 'client');
     if (existing) {
@@ -453,12 +492,12 @@ if (document.body.classList.contains('page-criadora')) {
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    await sb.from('sinalizacao').update({ answer: pc.localDescription.sdp, status: 'active' }).eq('id', callId);
+    await sb.from('sinalizacao').update({ answer: pc.localDescription.sdp, status:'active' }).eq('id', callId);
     callStatusMsg.textContent = 'Chamada em andamento';
 
     const sigCh = sb.channel('criadora-sig-' + callId)
       .on('postgres_changes', {
-        event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
+        event:'UPDATE', schema:'public', table:'sinalizacao', filter:`id=eq.${callId}`
       }, p => { if (p.new.status === 'ended') endCall(); })
       .subscribe();
     channels.push(sigCh);
@@ -468,13 +507,13 @@ if (document.body.classList.contains('page-criadora')) {
     CriadoraRing.stop();
     incomingSection.classList.add('hidden');
     if (incomingCallId) {
-      await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', incomingCallId);
+      await sb.from('sinalizacao').update({ status:'rejected' }).eq('id', incomingCallId);
       incomingCallId = null;
     }
   });
 
   endCallBtn.addEventListener('click', async () => {
-    if (callId) await sb.from('sinalizacao').update({ status: 'ended' }).eq('id', callId);
+    if (callId) await sb.from('sinalizacao').update({ status:'ended' }).eq('id', callId);
     endCall();
   });
 
