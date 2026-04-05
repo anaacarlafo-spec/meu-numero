@@ -1,15 +1,12 @@
 // Service Worker — Meu Número
-// Escuta push e mostra notificação de chamada recebida
+// Web Push real para iPhone (iOS 16.4+)
 
-self.addEventListener('install', e => {
-  self.skipWaiting();
-});
+const CACHE = 'meu-numero-v2';
 
-self.addEventListener('activate', e => {
-  e.waitUntil(clients.claim());
-});
+self.addEventListener('install', e => { self.skipWaiting(); });
+self.addEventListener('activate', e => { e.waitUntil(clients.claim()); });
 
-// Recebe push do servidor (Supabase Edge Function ou Web Push API)
+// ── Push recebido do servidor (via VAPID) ──────────────────────────
 self.addEventListener('push', e => {
   const data = e.data ? e.data.json() : {};
   const title = data.title || '📞 Chamada recebida';
@@ -23,13 +20,14 @@ self.addEventListener('push', e => {
       tag:     'incoming-call',
       renotify: true,
       requireInteraction: true,
-      vibrate: [300, 100, 300, 100, 300],
+      silent:  false,
+      vibrate: [400, 100, 400, 100, 400, 100, 400],
       data:    { url: '/criadora.html' }
     })
   );
 });
 
-// Clique na notificação abre/foca o painel da criadora
+// ── Clique na notificação: abre/foca o painel ──────────────────────
 self.addEventListener('notificationclick', e => {
   e.notification.close();
   e.waitUntil(
@@ -42,19 +40,22 @@ self.addEventListener('notificationclick', e => {
   );
 });
 
-// Mensagem recebida do app (quando Supabase detecta chamada no frontend)
-// O app envia { type: 'INCOMING_CALL' } via postMessage ao SW
+// ── Mensagem do app (fecha notificação quando chamada cancelar) ──────
 self.addEventListener('message', e => {
+  if (e.data && e.data.type === 'CLOSE_NOTIFICATION') {
+    self.registration.getNotifications({ tag: 'incoming-call' })
+      .then(notifs => notifs.forEach(n => n.close()));
+  }
+  // Fallback legado: app em foreground pediu notificação
   if (e.data && e.data.type === 'INCOMING_CALL') {
     self.registration.showNotification('📞 Chamada recebida', {
-      body:    'Um cliente está ligando para você!',
-      icon:    '/icon-192.png',
-      badge:   '/icon-192.png',
-      tag:     'incoming-call',
+      body: 'Um cliente está ligando para você!',
+      icon: '/icon-192.png',
+      tag:  'incoming-call',
       renotify: true,
       requireInteraction: true,
-      vibrate: [300, 100, 300, 100, 300],
-      data:    { url: '/criadora.html' }
+      silent: false,
+      vibrate: [400, 100, 400, 100, 400]
     });
   }
 });

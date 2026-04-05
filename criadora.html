@@ -64,9 +64,9 @@
 
     <main class="dash-main">
 
-      <!-- Banner de permissão de notificação -->
+      <!-- Banner notificação push -->
       <div id="notifBanner" class="notif-banner hidden">
-        <p>🔔 Ative as notificações para receber chamadas mesmo com o app em segundo plano.</p>
+        <p>🔔 Ative as notificações para receber chamadas mesmo com o app minimizado.</p>
         <button id="notifBtn" class="btn-primary">Ativar notificações</button>
       </div>
 
@@ -124,32 +124,63 @@
   <script src="app.js"></script>
 
   <script>
-    // ─── Service Worker + Notificações ───────────────────────────────
+    const SUPABASE_URL = 'https://decuqgobcbuwgkaesbvo.supabase.co';
+    const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRlY3VxZ29iY2J1d2drYWVzYnZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUzMTEzMTAsImV4cCI6MjA5MDg4NzMxMH0.DbMHj0K36zwOqdfo_y1q3R7HJKHkTzHn2j-BIJIkkiQ';
+    const { createClient } = supabase;
+    const sbPush = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+    // VAPID public key — substitua após gerar em vapidkeys.com
+    const VAPID_PUBLIC_KEY = 'COLE_AQUI_SUA_CHAVE_PUBLICA_VAPID';
+
     let swReg = null;
+
+    function urlBase64ToUint8Array(base64String) {
+      const padding = '='.repeat((4 - base64String.length % 4) % 4);
+      const base64  = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+      const raw = atob(base64);
+      return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+    }
 
     async function registerSW() {
       if (!('serviceWorker' in navigator)) return;
       try {
         swReg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
         await navigator.serviceWorker.ready;
-      } catch (e) { console.warn('SW registro falhou:', e); }
+      } catch (e) { console.warn('SW:', e); }
     }
     registerSW();
 
-    // Mostra banner se notificações não foram concedidas
+    async function subscribePush() {
+      if (!swReg) return;
+      if (VAPID_PUBLIC_KEY === 'COLE_AQUI_SUA_CHAVE_PUBLICA_VAPID') return;
+      try {
+        const existing = await swReg.pushManager.getSubscription();
+        const sub = existing || await swReg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+        });
+        // Salva subscription no Supabase (tabela perfil_push)
+        await sbPush.from('perfil_push').upsert({
+          perfil_id: 1,
+          endpoint:  sub.endpoint,
+          subscription: sub.toJSON()
+        }, { onConflict: 'endpoint' });
+      } catch (e) { console.warn('subscribePush:', e); }
+    }
+
     const notifBanner = document.getElementById('notifBanner');
     const notifBtn    = document.getElementById('notifBtn');
 
     function checkNotifPermission() {
       if (!('Notification' in window)) return;
-      if (Notification.permission === 'default') {
+      if (Notification.permission !== 'granted') {
         notifBanner.classList.remove('hidden');
       } else {
         notifBanner.classList.add('hidden');
+        subscribePush();
       }
     }
 
-    // Só mostra o banner após o login (o dashboard ficar visível)
     const dashObserver = new MutationObserver(() => {
       const dash = document.getElementById('dashboardScreen');
       if (dash && !dash.classList.contains('hidden')) {
@@ -164,32 +195,18 @@
       const result = await Notification.requestPermission();
       if (result === 'granted') {
         notifBanner.classList.add('hidden');
+        await subscribePush();
       } else {
-        notifBtn.textContent = 'Permissão negada no navegador';
+        notifBtn.textContent = 'Permissão negada — verifique as configurações do Safari';
         notifBtn.disabled = true;
       }
     });
 
-    // Expõe função global para o app.js avisar o SW de chamada recebida
+    // Fallback foreground: se app estiver visível, o toque já roda pelo app.js
     window.notifyIncomingCall = function () {
-      // 1. Se o app está visível, o som já toca normalmente
       if (document.visibilityState === 'visible') return;
-
-      // 2. Se está em background, avisa via SW (postMessage)
       if (navigator.serviceWorker && navigator.serviceWorker.controller) {
         navigator.serviceWorker.controller.postMessage({ type: 'INCOMING_CALL' });
-        return;
-      }
-
-      // 3. Fallback: Notification API direta
-      if (Notification.permission === 'granted') {
-        new Notification('📞 Chamada recebida', {
-          body: 'Um cliente está ligando para você!',
-          icon: '/icon-192.png',
-          tag:  'incoming-call',
-          renotify: true,
-          requireInteraction: true
-        });
       }
     };
   </script>
