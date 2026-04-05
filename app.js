@@ -12,49 +12,38 @@ const sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ICE Servers
-// Estratégia em camadas:
-//   1. STUN do Google/Cloudflare — funciona em ~85% das redes (rápido, sem custo)
-//   2. TURN via UDP (fréeice.net) — cobre NAT simétrico e firewalls corporativos
-//   3. TURN via TCP 443 (fréeice.net) — último recurso: atravessa até proxies HTTPS
-//
-// freeturn.net e numb.viagenie.ca foram descontinuados.
-// freestun.net/freeice.net são ativos e gratuitos em 2025-2026.
+// ICE Servers — carregados dinamicamente via /api/ice
+// (Twilio NTS quando configurado, open-relay como fallback)
 // ─────────────────────────────────────────────────────────────────────────────
-const ICE_SERVERS = [
-  // — STUN (resolução de IP público, sem relay) —
-  { urls: 'stun:stun.l.google.com:19302'  },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' },
+let resolvedIceServers = null;
 
-  // — TURN UDP — atravessa a maioria dos NATs fora do Brasil —
-  {
-    urls:       'turn:freestun.net:3478',
-    username:   'free',
-    credential: 'free'
-  },
-  // TURN UDP alternativo (porta diferente, maior chance de passar em firewalls)
-  {
-    urls:       'turn:freestun.net:5350',
-    username:   'free',
-    credential: 'free'
-  },
-
-  // — TURN TCP 443 — último recurso: atravessa proxies HTTPS e redes corporativas —
-  {
-    urls:       'turns:freestun.net:5349',
-    username:   'free',
-    credential: 'free'
+async function getIceServers() {
+  if (resolvedIceServers) return resolvedIceServers;
+  try {
+    const r = await fetch('/api/ice');
+    const d = await r.json();
+    resolvedIceServers = d.iceServers;
+  } catch {
+    // Se /api/ice falhar, usa STUN basico
+    resolvedIceServers = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' }
+    ];
   }
-];
+  return resolvedIceServers;
+}
 
-// Config WebRTC
-const PC_CONFIG = {
-  iceServers:         ICE_SERVERS,
-  iceCandidatePoolSize: 4,
-  bundlePolicy:       'max-bundle',
-  rtcpMuxPolicy:      'require'
-};
+function buildPcConfig(iceServers) {
+  return {
+    iceServers,
+    iceCandidatePoolSize: 4,
+    bundlePolicy:         'max-bundle',
+    rtcpMuxPolicy:        'require'
+  };
+}
+
+// Pre-carrega os ICE servers assim que a pagina abre
+getIceServers();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RING — Web Audio API (cliente)
@@ -287,9 +276,19 @@ if (document.body.classList.contains('page-home')) {
     callBtn.disabled = true;
     Ring.init();
 
-    let mediaPromise = getMedia();
+    const [iceServers, mediaStream] = await Promise.all([
+      getIceServers(),
+      getMedia().catch(() => null)
+    ]);
 
-    pc = new RTCPeerConnection(PC_CONFIG);
+    if (!mediaStream) {
+      alert('Autorize o acesso à câmera e ao microfone no seu navegador.');
+      callBtn.disabled = false;
+      return;
+    }
+
+    pc = new RTCPeerConnection(buildPcConfig(iceServers));
+    localStream = mediaStream;
     currentRole = 'client';
     currentCallId = null;
     pendingCandidates = [];
@@ -311,14 +310,6 @@ if (document.body.classList.contains('page-home')) {
         setTimeout(endCall, 2000);
       }
     };
-
-    try { localStream = await mediaPromise; }
-    catch {
-      alert('Autorize o acesso à câmera e ao microfone no seu navegador.');
-      pc.close(); pc = null;
-      callBtn.disabled = false;
-      return;
-    }
 
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
     localVideo.srcObject = localStream;
@@ -548,9 +539,18 @@ if (document.body.classList.contains('page-criadora')) {
     currentCallId = callId;
     pendingCandidates = [];
 
-    let mediaPromise = getMedia();
+    const [iceServers, mediaStream] = await Promise.all([
+      getIceServers(),
+      getMedia().catch(() => null)
+    ]);
 
-    pc = new RTCPeerConnection(PC_CONFIG);
+    if (!mediaStream) {
+      alert('Autorize câmera e microfone para atender.');
+      await sb.from('sinalizacao').update({ status:'rejected' }).eq('id', callId);
+      callId = null; return;
+    }
+
+    pc = new RTCPeerConnection(buildPcConfig(iceServers));
 
     pc.onicecandidate = e => { if (e.candidate) queueCandidate(e.candidate); };
 
@@ -569,25 +569,16 @@ if (document.body.classList.contains('page-criadora')) {
       }
     };
 
-    await pc.setRemoteDescription({ type:'offer', sdp: offerSdp });
-
-    const [_, existingIce, localStream_] = await Promise.all([
-      Promise.resolve(),
-      sb.from('ice_candidates').select('candidate').eq('call_id', callId).eq('role', 'client'),
-      mediaPromise
-    ]);
-
-    if (!localStream_) {
-      alert('Autorize câmera e microfone para atender.');
-      await sb.from('sinalizacao').update({ status:'rejected' }).eq('id', callId);
-      pc.close(); pc = null; callId = null; return;
-    }
-
-    localStream = localStream_;
+    localStream = mediaStream;
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
     localVideo.srcObject = localStream;
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Conectando...';
+
+    await pc.setRemoteDescription({ type:'offer', sdp: offerSdp });
+
+    const existingIce = await sb.from('ice_candidates')
+      .select('candidate').eq('call_id', callId).eq('role', 'client');
 
     if (existingIce.data) await applyRemoteCandidates(pc, existingIce.data);
 
