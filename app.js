@@ -149,7 +149,6 @@ async function getMedia() {
 // Trickle ICE helpers
 // ─────────────────────────────────────────────────────────────
 
-// Buffer local para candidatos gerados antes do callId existir (lado cliente)
 let pendingCandidates = [];
 
 async function flushPendingCandidates(callId, role) {
@@ -273,8 +272,6 @@ if (document.body.classList.contains('page-home')) {
       }
     };
 
-    // ✅ REGISTRAR onicecandidate ANTES de createOffer/setLocalDescription
-    // Candidatos gerados antes do callId existir vao para o buffer
     pendingCandidates = [];
     pc.onicecandidate = e => {
       if (!e.candidate) return;
@@ -299,13 +296,9 @@ if (document.body.classList.contains('page-home')) {
     }
     callId = row.id;
 
-    // Enviar candidatos que foram gerados antes do callId existir
     await flushPendingCandidates(callId, 'client');
-
-    // Escutar candidatos ICE da criadora
     listenIceCandidates(callId, 'criadora', pc, channels);
 
-    // Escutar answer e status
     const sigCh = sb.channel('client-sig-' + callId)
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
@@ -489,6 +482,10 @@ if (document.body.classList.contains('page-criadora')) {
           incomingCallId = row.id;
           incomingSection.classList.remove('hidden');
           CriadoraRing.start();
+          // ✅ Avisa o Service Worker para disparar notificacao se app estiver em background
+          if (typeof window.notifyIncomingCall === 'function') {
+            window.notifyIncomingCall();
+          }
         }
       })
       .subscribe();
@@ -542,18 +539,14 @@ if (document.body.classList.contains('page-criadora')) {
       }
     };
 
-    // ✅ REGISTRAR onicecandidate ANTES de setRemoteDescription/createAnswer
     pc.onicecandidate = e => {
       if (e.candidate) sendIceCandidate(callId, 'criadora', e.candidate);
     };
 
-    // Escutar candidatos ICE do cliente (novos que chegarem)
     listenIceCandidates(callId, 'client', pc, channels);
 
-    // Setar oferta do cliente
     await pc.setRemoteDescription({ type: 'offer', sdp: sigRow.offer });
 
-    // Aplicar candidatos do cliente que ja chegaram antes de atender
     const { data: existing } = await sb.from('ice_candidates')
       .select('candidate').eq('call_id', callId).eq('role', 'client');
     if (existing) {
@@ -566,11 +559,9 @@ if (document.body.classList.contains('page-criadora')) {
       }
     }
 
-    // Criar e setar answer
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
 
-    // Gravar answer no banco
     await sb.from('sinalizacao').update({
       answer: pc.localDescription.sdp,
       status: 'active'
