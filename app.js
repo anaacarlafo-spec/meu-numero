@@ -7,7 +7,9 @@ const SUPABASE_URL = 'https://decuqgobcbuwgkaesbvo.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRlY3VxZ29iY2J1d2drYWVzYnZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUzMTEzMTAsImV4cCI6MjA5MDg4NzMxMH0.DbMHj0K36zwOqdfo_y1q3R7HJKHkTzHn2j-BIJIkkiQ';
 
 const { createClient } = supabase;
-const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
+const sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  realtime: { params: { eventsPerSecond: 40 } }  // mais eventos por segundo no canal realtime
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ICE Servers — STUN públicos estáveis (Google + Cloudflare)
@@ -16,10 +18,16 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' },
   { urls: 'stun:stun.cloudflare.com:3478' }
 ];
+
+// Config WebRTC — pool alto para coleta antecipada de candidatos
+const PC_CONFIG = {
+  iceServers: ICE_SERVERS,
+  iceCandidatePoolSize: 4,    // pré-coleta candidatos antes do offer/answer
+  bundlePolicy: 'max-bundle', // áudio + vídeo num único componente ICE
+  rtcpMuxPolicy: 'require'    // reduz portas e acelera negociação
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RING — Web Audio API (cliente)
@@ -69,7 +77,7 @@ const Ring = (() => {
 })();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RING para a CRIADORA — WAV gerado via PCM
+// RING para a CRIADORA
 // ─────────────────────────────────────────────────────────────────────────────
 const CriadoraRing = (() => {
   let audioEl = null;
@@ -108,26 +116,14 @@ const CriadoraRing = (() => {
     audioEl.volume = 0;
     const p = audioEl.play();
     if (p && p.then) {
-      p.then(() => {
-        audioEl.pause();
-        audioEl.currentTime = 0;
-        audioEl.volume = 0.5;
-        unlocked = true;
-      }).catch(() => {});
+      p.then(() => { audioEl.pause(); audioEl.currentTime = 0; audioEl.volume = 0.5; unlocked = true; }).catch(() => {});
     } else {
-      audioEl.pause();
-      audioEl.currentTime = 0;
-      audioEl.volume = 0.5;
-      unlocked = true;
+      audioEl.pause(); audioEl.currentTime = 0; audioEl.volume = 0.5; unlocked = true;
     }
   }
 
   function start() {
-    if (!audioEl) {
-      audioEl = new Audio(buildBlobUrl());
-      audioEl.loop   = true;
-      audioEl.volume = 0.5;
-    }
+    if (!audioEl) { audioEl = new Audio(buildBlobUrl()); audioEl.loop = true; audioEl.volume = 0.5; }
     audioEl.currentTime = 0;
     audioEl.volume = 0.5;
     audioEl.play().catch(() => {});
@@ -153,23 +149,58 @@ async function getMedia() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Trickle ICE helpers
+// ICE helpers — batch insert para reduzir round-trips
 // ─────────────────────────────────────────────────────────────────────────────
 let pendingCandidates = [];
+let flushScheduled    = false;
+let currentCallId     = null;
+let currentRole       = null;
 
-async function flushPendingCandidates(callId, role) {
-  for (const c of pendingCandidates) {
-    await sb.from('ice_candidates').insert({ call_id: callId, role, candidate: JSON.stringify(c) });
-  }
-  pendingCandidates = [];
+// Acumula candidatos e envia em lote a cada 80ms (trickle batching)
+function scheduleFlush() {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  setTimeout(async () => {
+    flushScheduled = false;
+    if (!pendingCandidates.length || !currentCallId) return;
+    const batch = pendingCandidates.splice(0);
+    const rows = batch.map(c => ({ call_id: currentCallId, role: currentRole, candidate: JSON.stringify(c) }));
+    await sb.from('ice_candidates').insert(rows);
+  }, 80);
 }
 
-async function sendIceCandidate(callId, role, candidate) {
+function queueCandidate(candidate) {
   if (!candidate) return;
-  await sb.from('ice_candidates').insert({ call_id: callId, role, candidate: JSON.stringify(candidate) });
+  if (currentCallId) {
+    // já temos callId: envia em lote
+    pendingCandidates.push(candidate);
+    scheduleFlush();
+  } else {
+    // ainda sem callId: guarda para enviar depois
+    pendingCandidates.push(candidate);
+  }
 }
 
-function listenIceCandidates(callId, peerRole, pc, channelRef) {
+async function flushPending() {
+  if (!pendingCandidates.length || !currentCallId) return;
+  const batch = pendingCandidates.splice(0);
+  const rows = batch.map(c => ({ call_id: currentCallId, role: currentRole, candidate: JSON.stringify(c) }));
+  await sb.from('ice_candidates').insert(rows);
+}
+
+// Aplica candidatos remotos em paralelo (Promise.all)
+async function applyRemoteCandidates(pc, rows) {
+  await Promise.all(
+    (rows || []).map(async r => {
+      try {
+        const c = JSON.parse(r.candidate);
+        if (c && c.candidate) await pc.addIceCandidate(new RTCIceCandidate(c));
+      } catch (e) { console.warn('addIceCandidate:', e); }
+    })
+  );
+}
+
+function listenIceCandidates(callId, peerRole, pc, channels) {
   const ch = sb.channel('ice-' + callId + '-' + peerRole)
     .on('postgres_changes', {
       event: 'INSERT', schema: 'public', table: 'ice_candidates',
@@ -178,14 +209,13 @@ function listenIceCandidates(callId, peerRole, pc, channelRef) {
       const row = payload.new;
       if (row.role !== peerRole) return;
       try {
-        const cand = JSON.parse(row.candidate);
-        if (pc && pc.remoteDescription && cand && cand.candidate) {
-          await pc.addIceCandidate(new RTCIceCandidate(cand));
-        }
-      } catch (e) { console.warn('addIceCandidate:', e); }
+        const c = JSON.parse(row.candidate);
+        if (pc && pc.remoteDescription && c && c.candidate)
+          await pc.addIceCandidate(new RTCIceCandidate(c));
+      } catch (e) { console.warn('addIceCandidate live:', e); }
     })
     .subscribe();
-  channelRef.push(ch);
+  channels.push(ch);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -209,16 +239,10 @@ if (document.body.classList.contains('page-home')) {
 
   async function loadPerfil() {
     const { data, error } = await sb.from('perfil').select('nome,foto_url,status').eq('id',1).single();
-    if (error) {
-      console.error('Erro ao carregar perfil:', error);
-      creatorName.textContent = 'Offline';
-      return;
-    }
+    if (error) { creatorName.textContent = 'Offline'; return; }
     if (!data) return;
     creatorName.textContent = data.nome || 'Criadora';
-    if (data.foto_url) {
-      creatorPhoto.src = data.foto_url;
-    }
+    if (data.foto_url) creatorPhoto.src = data.foto_url;
     applyStatus(data.status);
   }
 
@@ -244,21 +268,16 @@ if (document.body.classList.contains('page-home')) {
     callBtn.disabled = true;
     Ring.init();
 
-    try {
-      localStream = await getMedia();
-    } catch {
-      alert('Autorize o acesso à câmera e ao microfone no seu navegador.');
-      callBtn.disabled = false;
-      return;
-    }
+    // Inicia câmera + PeerConnection em paralelo
+    let mediaPromise = getMedia();
 
-    localVideo.srcObject = localStream;
-    callScreen.classList.remove('hidden');
-    callStatusMsg.textContent = 'Aguardando a criadora atender...';
-    Ring.start();
+    // Cria PC imediatamente para pré-coletar candidatos ICE
+    pc = new RTCPeerConnection(PC_CONFIG);
+    currentRole = 'client';
+    currentCallId = null;
+    pendingCandidates = [];
 
-    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceCandidatePoolSize: 10 });
-    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    pc.onicecandidate = e => { if (e.candidate) queueCandidate(e.candidate); };
 
     pc.ontrack = e => {
       if (e.streams && e.streams[0]) {
@@ -269,42 +288,46 @@ if (document.body.classList.contains('page-home')) {
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') {
-        callStatusMsg.textContent = 'Chamada em andamento';
-        Ring.stop();
-      }
+      if (pc.connectionState === 'connected') { callStatusMsg.textContent = 'Chamada em andamento'; Ring.stop(); }
       if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
         callStatusMsg.textContent = 'Conexão perdida. Encerrando...';
         setTimeout(endCall, 2000);
       }
     };
 
-    pc.oniceconnectionstatechange = () => {
-      console.log('ICE state:', pc.iceConnectionState);
-    };
+    try { localStream = await mediaPromise; }
+    catch {
+      alert('Autorize o acesso à câmera e ao microfone no seu navegador.');
+      pc.close(); pc = null;
+      callBtn.disabled = false;
+      return;
+    }
 
-    pendingCandidates = [];
-    pc.onicecandidate = e => {
-      if (!e.candidate) return;
-      if (callId) sendIceCandidate(callId, 'client', e.candidate);
-      else pendingCandidates.push(e.candidate);
-    };
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    localVideo.srcObject = localStream;
+    callScreen.classList.remove('hidden');
+    callStatusMsg.textContent = 'Aguardando a criadora atender...';
+    Ring.start();
 
+    // Cria offer
     const offer = await pc.createOffer({ offerToReceiveAudio:true, offerToReceiveVideo:true });
     await pc.setLocalDescription(offer);
 
+    // Insere na sinalizacao com o offer já embutido
     const { data: row, error } = await sb.from('sinalizacao')
       .insert({ role:'client', status:'calling', offer: pc.localDescription.sdp })
       .select('id').single();
 
     if (error || !row) {
       alert('Erro ao iniciar chamada. Tente novamente.');
-      endCall();
-      return;
+      endCall(); return;
     }
 
     callId = row.id;
-    await flushPendingCandidates(callId, 'client');
+    currentCallId = callId;
+
+    // Envia candidatos acumulados durante a criação do offer
+    await flushPending();
     listenIceCandidates(callId, 'criadora', pc, channels);
 
     const sigCh = sb.channel('client-sig-' + callId)
@@ -318,11 +341,7 @@ if (document.body.classList.contains('page-home')) {
             callStatusMsg.textContent = 'Conectando vídeo...';
           } catch (e) { console.error('setRemoteDescription (cliente):', e); }
         }
-        if (r.status === 'rejected') {
-          Ring.stop();
-          callStatusMsg.textContent = 'Chamada não atendida.';
-          setTimeout(endCall, 2000);
-        }
+        if (r.status === 'rejected') { Ring.stop(); callStatusMsg.textContent = 'Chamada não atendida.'; setTimeout(endCall, 2000); }
         if (r.status === 'ended') endCall();
       })
       .subscribe();
@@ -339,6 +358,7 @@ if (document.body.classList.contains('page-home')) {
     channels.forEach(ch => sb.removeChannel(ch));
     channels = [];
     pendingCandidates = [];
+    currentCallId = null;
     if (pc) { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
     localVideo.srcObject = null;
@@ -378,7 +398,9 @@ if (document.body.classList.contains('page-criadora')) {
   const endCallBtn      = document.getElementById('endCallBtn');
   const callStatusMsg   = document.getElementById('callStatusMsg');
 
-  let localStream = null, pc = null, callId = null, incomingCallId = null, listenCh = null, channels = [];
+  let localStream = null, pc = null, callId = null;
+  let incomingCallId = null, incomingOffer = null; // guarda offer junto com o ID
+  let listenCh = null, channels = [];
 
   async function init() {
     const { data: { session } } = await sb.auth.getSession();
@@ -477,32 +499,26 @@ if (document.body.classList.contains('page-criadora')) {
     CriadoraRing.stop();
     incomingSection.classList.add('hidden');
     incomingCallId = null;
-    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-      navigator.serviceWorker.controller.postMessage({ type: 'CLOSE_NOTIFICATION' });
-    }
+    incomingOffer  = null;
   }
 
   function startListening() {
     if (listenCh) sb.removeChannel(listenCh);
     listenCh = sb.channel('criadora-incoming')
-      .on('postgres_changes', {
-        event:'INSERT', schema:'public', table:'sinalizacao'
-      }, payload => {
+      .on('postgres_changes', { event:'INSERT', schema:'public', table:'sinalizacao' }, payload => {
         const row = payload.new;
+        // O offer já vem junto com o evento INSERT — sem SELECT extra!
         if (row.status === 'calling' && row.offer) {
           incomingCallId = row.id;
+          incomingOffer  = row.offer; // guarda aqui para usar direto no atender
           incomingSection.classList.remove('hidden');
           CriadoraRing.start();
-          if (typeof window.notifyIncomingCall === 'function') window.notifyIncomingCall();
         }
       })
-      .on('postgres_changes', {
-        event:'UPDATE', schema:'public', table:'sinalizacao'
-      }, payload => {
+      .on('postgres_changes', { event:'UPDATE', schema:'public', table:'sinalizacao' }, payload => {
         const row = payload.new;
-        if (row.id === incomingCallId && (row.status === 'ended' || row.status === 'rejected')) {
+        if (row.id === incomingCallId && (row.status === 'ended' || row.status === 'rejected'))
           cancelIncoming();
-        }
       })
       .subscribe();
   }
@@ -511,30 +527,21 @@ if (document.body.classList.contains('page-criadora')) {
     CriadoraRing.stop();
     incomingSection.classList.add('hidden');
     callId = incomingCallId;
+    const offerSdp = incomingOffer; // usa o offer já em memória — sem round-trip!
     incomingCallId = null;
+    incomingOffer  = null;
 
-    try { localStream = await getMedia(); }
-    catch {
-      alert('Autorize câmera e microfone para atender.');
-      await sb.from('sinalizacao').update({ status:'rejected' }).eq('id', callId);
-      callId = null;
-      return;
-    }
+    // Inicia câmera e PeerConnection em paralelo
+    currentRole = 'criadora';
+    currentCallId = callId;
+    pendingCandidates = [];
 
-    localVideo.srcObject = localStream;
-    callScreen.classList.remove('hidden');
-    callStatusMsg.textContent = 'Conectando...';
+    let mediaPromise = getMedia();
 
-    const { data: sigRow } = await sb.from('sinalizacao').select('offer').eq('id', callId).single();
-    if (!sigRow || !sigRow.offer) {
-      alert('Erro: oferta do cliente não encontrada.');
-      await sb.from('sinalizacao').update({ status:'rejected' }).eq('id', callId);
-      endCall();
-      return;
-    }
+    // Cria PC imediatamente
+    pc = new RTCPeerConnection(PC_CONFIG);
 
-    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceCandidatePoolSize: 10 });
-    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    pc.onicecandidate = e => { if (e.candidate) queueCandidate(e.candidate); };
 
     pc.ontrack = e => {
       if (e.streams && e.streams[0]) {
@@ -551,36 +558,43 @@ if (document.body.classList.contains('page-criadora')) {
       }
     };
 
-    pc.oniceconnectionstatechange = () => {
-      console.log('ICE state (criadora):', pc.iceConnectionState);
-    };
+    // Aplica o remote description imediatamente (offer já está em memória)
+    await pc.setRemoteDescription({ type:'offer', sdp: offerSdp });
 
-    pc.onicecandidate = e => {
-      if (e.candidate) sendIceCandidate(callId, 'criadora', e.candidate);
-    };
+    // Busca candidatos ICE já existentes do cliente E aguarda a câmera — em paralelo
+    const [_, existingIce, localStream_] = await Promise.all([
+      Promise.resolve(), // placeholder
+      sb.from('ice_candidates').select('candidate').eq('call_id', callId).eq('role', 'client'),
+      mediaPromise
+    ]);
 
-    listenIceCandidates(callId, 'client', pc, channels);
-
-    await pc.setRemoteDescription({ type:'offer', sdp: sigRow.offer });
-
-    const { data: existing } = await sb.from('ice_candidates')
-      .select('candidate')
-      .eq('call_id', callId)
-      .eq('role', 'client');
-
-    if (existing) {
-      for (const c of existing) {
-        try {
-          const cand = JSON.parse(c.candidate);
-          if (cand && cand.candidate) await pc.addIceCandidate(new RTCIceCandidate(cand));
-        } catch {}
-      }
+    if (!localStream_) {
+      alert('Autorize câmera e microfone para atender.');
+      await sb.from('sinalizacao').update({ status:'rejected' }).eq('id', callId);
+      pc.close(); pc = null; callId = null; return;
     }
 
+    localStream = localStream_;
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    localVideo.srcObject = localStream;
+    callScreen.classList.remove('hidden');
+    callStatusMsg.textContent = 'Conectando...';
+
+    // Aplica candidatos existentes do cliente em paralelo
+    if (existingIce.data) await applyRemoteCandidates(pc, existingIce.data);
+
+    // Escuta novos candidatos do cliente em tempo real
+    listenIceCandidates(callId, 'client', pc, channels);
+
+    // Cria answer
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    await sb.from('sinalizacao').update({ answer: pc.localDescription.sdp, status:'active' }).eq('id', callId);
-    callStatusMsg.textContent = 'Chamada em andamento';
+
+    // Envia candidatos acumulados + answer em paralelo
+    await Promise.all([
+      sb.from('sinalizacao').update({ answer: pc.localDescription.sdp, status:'active' }).eq('id', callId),
+      flushPending()
+    ]);
 
     const sigCh = sb.channel('criadora-sig-' + callId)
       .on('postgres_changes', {
@@ -596,6 +610,7 @@ if (document.body.classList.contains('page-criadora')) {
     if (incomingCallId) {
       await sb.from('sinalizacao').update({ status:'rejected' }).eq('id', incomingCallId);
       incomingCallId = null;
+      incomingOffer  = null;
     }
   });
 
@@ -608,6 +623,8 @@ if (document.body.classList.contains('page-criadora')) {
     CriadoraRing.stop();
     channels.forEach(ch => sb.removeChannel(ch));
     channels = [];
+    pendingCandidates = [];
+    currentCallId = null;
     if (pc) { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
     localVideo.srcObject = null;
