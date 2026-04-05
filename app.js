@@ -1,17 +1,30 @@
 'use strict';
 
-const SUPABASE_URL = 'https://decuqgobcbuwgkaesbvo.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRlY3VxZ29iY2J1d2drYWVzYnZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUzMTEzMTAsImV4cCI6MjA5MDg4NzMxMH0.DbMHj0K36zwOqdfo_y1q3R7HJKHkTzHn2j-BIJIkkiQ';
+// ─────────────────────────────────────────────────────────────
+// Lê credenciais Supabase das meta tags injetadas pelo Vercel
+// ─────────────────────────────────────────────────────────────
+function getMeta(name) {
+  const el = document.querySelector(`meta[name="${name}"]`);
+  return el ? el.getAttribute('content') : null;
+}
+
+const SUPABASE_URL = getMeta('supabase-url') || 'https://decuqgobcbuwgkaesbvo.supabase.co';
+const SUPABASE_KEY = getMeta('supabase-key') || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRlY3VxZ29iY2J1d2drYWVzYnZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUzMTEzMTAsImV4cCI6MjA5MDg4NzMxMH0.DbMHj0K36zwOqdfo_y1q3R7HJKHkTzHn2j-BIJIkkiQ';
 
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// ─────────────────────────────────────────────────────────────
+// ICE Servers — STUN públicos do Google + Cloudflare
+// (openrelay foi descontinuado; TURN gratuito removido para evitar falhas)
+// ─────────────────────────────────────────────────────────────
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'turn:openrelay.metered.ca:80',  username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun4.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' }
 ];
 
 // ─────────────────────────────────────────────────────────────
@@ -19,11 +32,14 @@ const ICE_SERVERS = [
 // ─────────────────────────────────────────────────────────────
 const Ring = (() => {
   let ctx = null;
+  let intervalId = null;
+
   function init() {
     if (ctx) return;
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     if (ctx.state === 'suspended') ctx.resume();
   }
+
   function tone(freq, startOffset, peakVol, duration) {
     if (!ctx || ctx.state !== 'running') return;
     const now = ctx.currentTime;
@@ -39,11 +55,22 @@ const Ring = (() => {
     osc.start(now + startOffset);
     osc.stop(now + startOffset + duration);
   }
-  function start() {
-    tone(1047, 0, 0.20, 0.55);
+
+  function playOnce() {
+    tone(1047, 0,    0.20, 0.55);
     tone(1319, 0.18, 0.15, 0.55);
   }
-  function stop() {}
+
+  function start() {
+    if (intervalId) return;
+    playOnce();
+    intervalId = setInterval(playOnce, 2000);
+  }
+
+  function stop() {
+    if (intervalId) { clearInterval(intervalId); intervalId = null; }
+  }
+
   return { init, start, stop };
 })();
 
@@ -55,7 +82,6 @@ const CriadoraRing = (() => {
   let blobUrl  = null;
   let unlocked = false;
 
-  // Gera blob WAV uma única vez
   function buildBlobUrl() {
     if (blobUrl) return blobUrl;
     const sampleRate = 44100, duration = 0.8, freq = 880;
@@ -80,20 +106,18 @@ const CriadoraRing = (() => {
     return blobUrl;
   }
 
-  // Deve ser chamado em resposta a um toque do utilizador (ex: clicar em Online)
-  // Cria o elemento Audio e toca silenciosamente para desbloquear o iOS
   function unlock() {
     if (unlocked) return;
     const url = buildBlobUrl();
     audioEl = new Audio(url);
     audioEl.loop   = true;
-    audioEl.volume = 0;          // silencioso — só para desbloquear
+    audioEl.volume = 0;
     const p = audioEl.play();
     if (p && p.then) {
       p.then(() => {
         audioEl.pause();
         audioEl.currentTime = 0;
-        audioEl.volume = 0.5;    // restaura volume real
+        audioEl.volume = 0.5;
         unlocked = true;
       }).catch(() => {});
     } else {
@@ -106,7 +130,6 @@ const CriadoraRing = (() => {
 
   function start() {
     if (!audioEl) {
-      // fallback: tenta criar sem desbloqueio prévio
       audioEl = new Audio(buildBlobUrl());
       audioEl.loop   = true;
       audioEl.volume = 0.5;
@@ -126,9 +149,11 @@ const CriadoraRing = (() => {
 })();
 
 // ─────────────────────────────────────────────────────────────
+// getUserMedia
+// ─────────────────────────────────────────────────────────────
 async function getMedia() {
   return navigator.mediaDevices.getUserMedia({
-    video: { width:{ideal:1920}, height:{ideal:1080}, aspectRatio:{ideal:16/9}, frameRate:{ideal:30}, facingMode:'user' },
+    video: { width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:30}, facingMode:'user' },
     audio: { echoCancellation:true, noiseSuppression:true }
   });
 }
@@ -139,8 +164,9 @@ async function getMedia() {
 let pendingCandidates = [];
 
 async function flushPendingCandidates(callId, role) {
-  for (const c of pendingCandidates)
+  for (const c of pendingCandidates) {
     await sb.from('ice_candidates').insert({ call_id: callId, role, candidate: JSON.stringify(c) });
+  }
   pendingCandidates = [];
 }
 
@@ -152,14 +178,16 @@ async function sendIceCandidate(callId, role, candidate) {
 function listenIceCandidates(callId, peerRole, pc, channelRef) {
   const ch = sb.channel('ice-' + callId + '-' + peerRole)
     .on('postgres_changes', {
-      event: 'INSERT', schema: 'public', table: 'ice_candidates', filter: `call_id=eq.${callId}`
+      event: 'INSERT', schema: 'public', table: 'ice_candidates',
+      filter: `call_id=eq.${callId}`
     }, async payload => {
       const row = payload.new;
       if (row.role !== peerRole) return;
       try {
         const cand = JSON.parse(row.candidate);
-        if (pc && pc.remoteDescription && cand && cand.candidate)
+        if (pc && pc.remoteDescription && cand && cand.candidate) {
           await pc.addIceCandidate(new RTCIceCandidate(cand));
+        }
       } catch (e) { console.warn('addIceCandidate:', e); }
     })
     .subscribe();
@@ -167,7 +195,7 @@ function listenIceCandidates(callId, peerRole, pc, channelRef) {
 }
 
 // ══════════════════════════════════════════════════════════════
-// HOME — pagina publica (cliente)
+// HOME — página pública (cliente)
 // ══════════════════════════════════════════════════════════════
 if (document.body.classList.contains('page-home')) {
 
@@ -184,6 +212,7 @@ if (document.body.classList.contains('page-home')) {
   const callStatusMsg = document.getElementById('callStatusMsg');
 
   let localStream = null, pc = null, callId = null, channels = [];
+  let ringInterval = null;
 
   async function loadPerfil() {
     const { data } = await sb.from('perfil').select('nome,foto_url,status').eq('id',1).single();
@@ -199,10 +228,13 @@ if (document.body.classList.contains('page-home')) {
     statusLabel.className = 'status-label ' + (on ? 'online-text' : 'offline-text');
     statusLabel.textContent = on ? 'Online agora' : 'Offline agora';
     callBtn.disabled = !on;
-    callHint.textContent = on ? 'Clique para iniciar a videochamada.' : 'A criadora esta offline no momento.';
+    callHint.textContent = on
+      ? 'Clique para iniciar a videochamada.'
+      : 'A criadora está offline no momento.';
   }
 
   loadPerfil();
+
   sb.channel('perfil-public')
     .on('postgres_changes', { event:'UPDATE', schema:'public', table:'perfil', filter:'id=eq.1' },
       p => applyStatus(p.new.status))
@@ -211,30 +243,44 @@ if (document.body.classList.contains('page-home')) {
   callBtn.addEventListener('click', async () => {
     callBtn.disabled = true;
     Ring.init();
+
     try {
       localStream = await getMedia();
     } catch {
-      alert('Autorize o acesso a camera e ao microfone no seu navegador.');
+      alert('Autorize o acesso à câmera e ao microfone no seu navegador.');
       callBtn.disabled = false;
       return;
     }
+
     localVideo.srcObject = localStream;
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
     Ring.start();
 
-    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceCandidatePoolSize: 10 });
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
     pc.ontrack = e => {
       if (e.streams && e.streams[0]) {
         remoteVideo.srcObject = e.streams[0];
         callStatusMsg.textContent = 'Chamada em andamento';
+        Ring.stop();
       }
     };
+
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') callStatusMsg.textContent = 'Chamada em andamento';
-      if (pc.connectionState === 'failed') { callStatusMsg.textContent = 'Falha na conexao. Tente novamente.'; setTimeout(endCall, 3000); }
+      if (pc.connectionState === 'connected') {
+        callStatusMsg.textContent = 'Chamada em andamento';
+        Ring.stop();
+      }
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        callStatusMsg.textContent = 'Conexão perdida. Encerrando...';
+        setTimeout(endCall, 2000);
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log('ICE state:', pc.iceConnectionState);
     };
 
     pendingCandidates = [];
@@ -251,9 +297,13 @@ if (document.body.classList.contains('page-home')) {
       .insert({ role:'client', status:'calling', offer: pc.localDescription.sdp })
       .select('id').single();
 
-    if (error || !row) { alert('Erro ao iniciar chamada. Tente novamente.'); endCall(); return; }
-    callId = row.id;
+    if (error || !row) {
+      alert('Erro ao iniciar chamada. Tente novamente.');
+      endCall();
+      return;
+    }
 
+    callId = row.id;
     await flushPendingCandidates(callId, 'client');
     listenIceCandidates(callId, 'criadora', pc, channels);
 
@@ -263,10 +313,16 @@ if (document.body.classList.contains('page-home')) {
       }, async p => {
         const r = p.new;
         if (r.status === 'active' && r.answer && pc.signalingState === 'have-local-offer') {
-          try { await pc.setRemoteDescription({ type:'answer', sdp:r.answer }); callStatusMsg.textContent = 'Conectando video...'; }
-          catch (e) { console.error('setRemoteDescription (cliente):', e); }
+          try {
+            await pc.setRemoteDescription({ type:'answer', sdp:r.answer });
+            callStatusMsg.textContent = 'Conectando vídeo...';
+          } catch (e) { console.error('setRemoteDescription (cliente):', e); }
         }
-        if (r.status === 'rejected') { callStatusMsg.textContent = 'Chamada nao atendida.'; setTimeout(endCall, 2000); }
+        if (r.status === 'rejected') {
+          Ring.stop();
+          callStatusMsg.textContent = 'Chamada não atendida.';
+          setTimeout(endCall, 2000);
+        }
         if (r.status === 'ended') endCall();
       })
       .subscribe();
@@ -279,14 +335,18 @@ if (document.body.classList.contains('page-home')) {
   });
 
   function endCall() {
-    channels.forEach(ch => sb.removeChannel(ch)); channels = [];
+    Ring.stop();
+    channels.forEach(ch => sb.removeChannel(ch));
+    channels = [];
     pendingCandidates = [];
     if (pc) { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
-    localVideo.srcObject = null; remoteVideo.srcObject = null;
+    localVideo.srcObject = null;
+    remoteVideo.srcObject = null;
     callScreen.classList.add('hidden');
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
-    callId = null; callBtn.disabled = false;
+    callId = null;
+    callBtn.disabled = false;
   }
 }
 
@@ -326,11 +386,15 @@ if (document.body.classList.contains('page-criadora')) {
   }
   init();
 
-  sb.auth.onAuthStateChange((_e, session) => { if (session) showDashboard(); else showLogin(); });
+  sb.auth.onAuthStateChange((_e, session) => {
+    if (session) showDashboard();
+    else showLogin();
+  });
 
   loginForm.addEventListener('submit', async e => {
     e.preventDefault();
-    loginBtn.disabled = true; loginBtn.textContent = 'Entrando...';
+    loginBtn.disabled = true;
+    loginBtn.textContent = 'Entrando...';
     loginError.classList.add('hidden');
     const email = document.getElementById('loginEmail').value.trim();
     const pass  = document.getElementById('loginPassword').value;
@@ -338,11 +402,15 @@ if (document.body.classList.contains('page-criadora')) {
     if (error) {
       loginError.textContent = 'E-mail ou senha incorretos.';
       loginError.classList.remove('hidden');
-      loginBtn.disabled = false; loginBtn.textContent = 'Entrar';
+      loginBtn.disabled = false;
+      loginBtn.textContent = 'Entrar';
     }
   });
 
-  logoutBtn.addEventListener('click', async () => { await setStatus('offline'); await sb.auth.signOut(); });
+  logoutBtn.addEventListener('click', async () => {
+    await setStatus('offline');
+    await sb.auth.signOut();
+  });
 
   function showLogin() {
     dashboardScreen.classList.add('hidden');
@@ -370,12 +438,11 @@ if (document.body.classList.contains('page-criadora')) {
     btnOnline.classList.toggle('active', on);
     btnOffline.classList.toggle('active', !on);
     statusFeedback.textContent = on
-      ? 'Voce esta online. Pode receber chamadas.'
-      : 'Voce esta offline. Clientes nao podem ligar.';
+      ? 'Você está online. Pode receber chamadas.'
+      : 'Você está offline. Clientes não podem ligar.';
   }
 
   async function setStatus(s) {
-    // Desbloqueia áudio do iOS no mesmo gesto de toque
     if (s === 'online') CriadoraRing.unlock();
     await sb.from('perfil').update({ status: s }).eq('id', 1);
     applyStatusUI(s);
@@ -448,9 +515,10 @@ if (document.body.classList.contains('page-criadora')) {
 
     try { localStream = await getMedia(); }
     catch {
-      alert('Autorize camera e microfone para atender.');
+      alert('Autorize câmera e microfone para atender.');
       await sb.from('sinalizacao').update({ status:'rejected' }).eq('id', callId);
-      callId = null; return;
+      callId = null;
+      return;
     }
 
     localVideo.srcObject = localStream;
@@ -459,28 +527,48 @@ if (document.body.classList.contains('page-criadora')) {
 
     const { data: sigRow } = await sb.from('sinalizacao').select('offer').eq('id', callId).single();
     if (!sigRow || !sigRow.offer) {
-      alert('Erro: oferta do cliente nao encontrada.');
+      alert('Erro: oferta do cliente não encontrada.');
       await sb.from('sinalizacao').update({ status:'rejected' }).eq('id', callId);
-      endCall(); return;
+      endCall();
+      return;
     }
 
-    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, iceCandidatePoolSize: 10 });
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
     pc.ontrack = e => {
-      if (e.streams && e.streams[0]) { remoteVideo.srcObject = e.streams[0]; callStatusMsg.textContent = 'Chamada em andamento'; }
-    };
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') callStatusMsg.textContent = 'Chamada em andamento';
-      if (pc.connectionState === 'failed') { callStatusMsg.textContent = 'Falha na conexao.'; setTimeout(endCall, 3000); }
+      if (e.streams && e.streams[0]) {
+        remoteVideo.srcObject = e.streams[0];
+        callStatusMsg.textContent = 'Chamada em andamento';
+      }
     };
 
-    pc.onicecandidate = e => { if (e.candidate) sendIceCandidate(callId, 'criadora', e.candidate); };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'connected') callStatusMsg.textContent = 'Chamada em andamento';
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        callStatusMsg.textContent = 'Conexão perdida.';
+        setTimeout(endCall, 2000);
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log('ICE state (criadora):', pc.iceConnectionState);
+    };
+
+    pc.onicecandidate = e => {
+      if (e.candidate) sendIceCandidate(callId, 'criadora', e.candidate);
+    };
+
     listenIceCandidates(callId, 'client', pc, channels);
 
     await pc.setRemoteDescription({ type:'offer', sdp: sigRow.offer });
 
-    const { data: existing } = await sb.from('ice_candidates').select('candidate').eq('call_id', callId).eq('role', 'client');
+    // Aplica candidatos ICE do cliente que já chegaram
+    const { data: existing } = await sb.from('ice_candidates')
+      .select('candidate')
+      .eq('call_id', callId)
+      .eq('role', 'client');
+
     if (existing) {
       for (const c of existing) {
         try {
@@ -519,10 +607,12 @@ if (document.body.classList.contains('page-criadora')) {
 
   function endCall() {
     CriadoraRing.stop();
-    channels.forEach(ch => sb.removeChannel(ch)); channels = [];
+    channels.forEach(ch => sb.removeChannel(ch));
+    channels = [];
     if (pc) { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
-    localVideo.srcObject = null; remoteVideo.srcObject = null;
+    localVideo.srcObject = null;
+    remoteVideo.srcObject = null;
     callScreen.classList.add('hidden');
     callId = null;
   }
