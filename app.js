@@ -12,38 +12,35 @@ const sb = createClient(SUPABASE_URL, SUPABASE_KEY, {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ICE Servers — carregados dinamicamente via /api/ice
-// (Twilio NTS quando configurado, open-relay como fallback)
+// ICE Servers — SEMPRE busca fresh do /api/ice a cada chamada
+// Credenciais Twilio NTS expiram em 1h — nunca usar cache entre chamadas
 // ─────────────────────────────────────────────────────────────────────────────
-let resolvedIceServers = null;
-
 async function getIceServers() {
-  if (resolvedIceServers) return resolvedIceServers;
   try {
     const r = await fetch('/api/ice');
+    if (!r.ok) throw new Error('ice fetch ' + r.status);
     const d = await r.json();
-    resolvedIceServers = d.iceServers;
-  } catch {
-    // Se /api/ice falhar, usa STUN basico
-    resolvedIceServers = [
+    if (d.iceServers && d.iceServers.length) return d.iceServers;
+    throw new Error('empty');
+  } catch (err) {
+    console.warn('getIceServers fallback:', err.message);
+    return [
       { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun.cloudflare.com:3478' }
     ];
   }
-  return resolvedIceServers;
 }
 
 function buildPcConfig(iceServers) {
   return {
     iceServers,
-    iceCandidatePoolSize: 4,
+    // Pool maior melhora candidatos TURN em redes internacionais
+    iceCandidatePoolSize: 10,
     bundlePolicy:         'max-bundle',
     rtcpMuxPolicy:        'require'
   };
 }
-
-// Pre-carrega os ICE servers assim que a pagina abre
-getIceServers();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RING — Web Audio API (cliente)
@@ -276,6 +273,7 @@ if (document.body.classList.contains('page-home')) {
     callBtn.disabled = true;
     Ring.init();
 
+    // Busca ICE servers frescos + mídia em paralelo
     const [iceServers, mediaStream] = await Promise.all([
       getIceServers(),
       getMedia().catch(() => null)
@@ -539,6 +537,7 @@ if (document.body.classList.contains('page-criadora')) {
     currentCallId = callId;
     pendingCandidates = [];
 
+    // Busca ICE servers frescos a cada chamada aceita
     const [iceServers, mediaStream] = await Promise.all([
       getIceServers(),
       getMedia().catch(() => null)
