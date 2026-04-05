@@ -148,6 +148,17 @@ async function getMedia() {
 // ─────────────────────────────────────────────────────────────
 // Trickle ICE helpers
 // ─────────────────────────────────────────────────────────────
+
+// Buffer local para candidatos gerados antes do callId existir (lado cliente)
+let pendingCandidates = [];
+
+async function flushPendingCandidates(callId, role) {
+  for (const c of pendingCandidates) {
+    await sb.from('ice_candidates').insert({ call_id: callId, role, candidate: JSON.stringify(c) });
+  }
+  pendingCandidates = [];
+}
+
 async function sendIceCandidate(callId, role, candidate) {
   if (!candidate) return;
   await sb.from('ice_candidates').insert({
@@ -158,7 +169,6 @@ async function sendIceCandidate(callId, role, candidate) {
 }
 
 function listenIceCandidates(callId, peerRole, pc, channelRef) {
-  // peerRole = papel de quem ENVIOU os candidatos que queremos receber
   const ch = sb.channel('ice-' + callId + '-' + peerRole)
     .on('postgres_changes', {
       event:  'INSERT',
@@ -167,7 +177,7 @@ function listenIceCandidates(callId, peerRole, pc, channelRef) {
       filter: `call_id=eq.${callId}`
     }, async payload => {
       const row = payload.new;
-      if (row.role !== peerRole) return; // so candidatos do outro lado
+      if (row.role !== peerRole) return;
       try {
         const cand = JSON.parse(row.candidate);
         if (pc && pc.remoteDescription && cand && cand.candidate) {
@@ -199,7 +209,7 @@ if (document.body.classList.contains('page-home')) {
   let localStream = null;
   let pc          = null;
   let callId      = null;
-  let channels    = [];   // todos os canais realtime desta chamada
+  let channels    = [];
 
   async function loadPerfil() {
     const { data } = await sb.from('perfil').select('nome,foto_url,status').eq('id',1).single();
@@ -244,11 +254,9 @@ if (document.body.classList.contains('page-home')) {
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
     Ring.start();
 
-    // Criar PeerConnection ANTES de gravar oferta
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-    // Receber video/audio da criadora
     pc.ontrack = e => {
       if (e.streams && e.streams[0]) {
         remoteVideo.srcObject = e.streams[0];
@@ -265,11 +273,21 @@ if (document.body.classList.contains('page-home')) {
       }
     };
 
-    // Criar oferta SEM esperar ICE completo (trickle)
+    // ✅ REGISTRAR onicecandidate ANTES de createOffer/setLocalDescription
+    // Candidatos gerados antes do callId existir vao para o buffer
+    pendingCandidates = [];
+    pc.onicecandidate = e => {
+      if (!e.candidate) return;
+      if (callId) {
+        sendIceCandidate(callId, 'client', e.candidate);
+      } else {
+        pendingCandidates.push(e.candidate);
+      }
+    };
+
     const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
     await pc.setLocalDescription(offer);
 
-    // Gravar chamada no banco
     const { data: row, error } = await sb.from('sinalizacao')
       .insert({ role: 'client', status: 'calling', offer: pc.localDescription.sdp })
       .select('id').single();
@@ -281,15 +299,13 @@ if (document.body.classList.contains('page-home')) {
     }
     callId = row.id;
 
-    // Enviar candidatos ICE do cliente assim que forem gerados
-    pc.onicecandidate = e => {
-      if (e.candidate) sendIceCandidate(callId, 'client', e.candidate);
-    };
+    // Enviar candidatos que foram gerados antes do callId existir
+    await flushPendingCandidates(callId, 'client');
 
     // Escutar candidatos ICE da criadora
     listenIceCandidates(callId, 'criadora', pc, channels);
 
-    // Escutar answer da criadora e status da chamada
+    // Escutar answer e status
     const sigCh = sb.channel('client-sig-' + callId)
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
@@ -319,6 +335,7 @@ if (document.body.classList.contains('page-home')) {
   function endCall() {
     channels.forEach(ch => sb.removeChannel(ch));
     channels = [];
+    pendingCandidates = [];
     if (pc)          { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
     localVideo.srcObject  = null;
@@ -496,24 +513,19 @@ if (document.body.classList.contains('page-criadora')) {
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Conectando...';
 
-    // Buscar oferta do cliente
-    const { data: row } = await sb.from('sinalizacao')
+    const { data: sigRow } = await sb.from('sinalizacao')
       .select('offer').eq('id', callId).single();
 
-    if (!row || !row.offer) {
+    if (!sigRow || !sigRow.offer) {
       alert('Erro: oferta do cliente nao encontrada.');
       await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', callId);
       endCall();
       return;
     }
 
-    // Criar PeerConnection
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-
-    // Adicionar todas as tracks da criadora (video + audio)
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-    // Receber video/audio do cliente
     pc.ontrack = e => {
       if (e.streams && e.streams[0]) {
         remoteVideo.srcObject = e.streams[0];
@@ -530,44 +542,42 @@ if (document.body.classList.contains('page-criadora')) {
       }
     };
 
-    // Definir oferta do cliente como remota
-    await pc.setRemoteDescription({ type: 'offer', sdp: row.offer });
-
-    // Criar answer SEM esperar ICE completo (trickle)
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    // Gravar answer no banco imediatamente
-    await sb.from('sinalizacao').update({
-      answer: pc.localDescription.sdp,
-      status: 'active'
-    }).eq('id', callId);
-
-    // Enviar candidatos ICE da criadora assim que forem gerados
+    // ✅ REGISTRAR onicecandidate ANTES de setRemoteDescription/createAnswer
     pc.onicecandidate = e => {
       if (e.candidate) sendIceCandidate(callId, 'criadora', e.candidate);
     };
 
-    // Escutar candidatos ICE do cliente
+    // Escutar candidatos ICE do cliente (novos que chegarem)
     listenIceCandidates(callId, 'client', pc, channels);
 
-    // Aplicar candidatos ICE do cliente que ja chegaram antes de atender
-    const { data: existingCandidates } = await sb.from('ice_candidates')
-      .select('candidate').eq('call_id', callId).eq('role', 'client');
+    // Setar oferta do cliente
+    await pc.setRemoteDescription({ type: 'offer', sdp: sigRow.offer });
 
-    if (existingCandidates) {
-      for (const row of existingCandidates) {
+    // Aplicar candidatos do cliente que ja chegaram antes de atender
+    const { data: existing } = await sb.from('ice_candidates')
+      .select('candidate').eq('call_id', callId).eq('role', 'client');
+    if (existing) {
+      for (const c of existing) {
         try {
-          const cand = JSON.parse(row.candidate);
+          const cand = JSON.parse(c.candidate);
           if (cand && cand.candidate)
             await pc.addIceCandidate(new RTCIceCandidate(cand));
         } catch {}
       }
     }
 
+    // Criar e setar answer
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    // Gravar answer no banco
+    await sb.from('sinalizacao').update({
+      answer: pc.localDescription.sdp,
+      status: 'active'
+    }).eq('id', callId);
+
     callStatusMsg.textContent = 'Chamada em andamento';
 
-    // Monitorar encerramento
     const sigCh = sb.channel('criadora-sig-' + callId)
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
