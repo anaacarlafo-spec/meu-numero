@@ -6,25 +6,12 @@ const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 const { createClient } = supabase;
 const sb = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// STUN + TURN (Open Relay — gratuito, cobre conexoes internacionais)
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  {
-    urls:       'turn:openrelay.metered.ca:80',
-    username:   'openrelayproject',
-    credential: 'openrelayproject'
-  },
-  {
-    urls:       'turn:openrelay.metered.ca:443',
-    username:   'openrelayproject',
-    credential: 'openrelayproject'
-  },
-  {
-    urls:       'turn:openrelay.metered.ca:443?transport=tcp',
-    username:   'openrelayproject',
-    credential: 'openrelayproject'
-  }
+  { urls: 'turn:openrelay.metered.ca:80',  username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
 ];
 
 // ─────────────────────────────────────────────────────────────
@@ -32,17 +19,15 @@ const ICE_SERVERS = [
 // ─────────────────────────────────────────────────────────────
 const Ring = (() => {
   let ctx = null;
-
   function init() {
     if (ctx) return;
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     if (ctx.state === 'suspended') ctx.resume();
   }
-
   function tone(freq, startOffset, peakVol, duration) {
     if (!ctx || ctx.state !== 'running') return;
-    const now  = ctx.currentTime;
-    const osc  = ctx.createOscillator();
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
     osc.frequency.value = freq;
@@ -54,134 +39,85 @@ const Ring = (() => {
     osc.start(now + startOffset);
     osc.stop(now + startOffset + duration);
   }
-
   function start() {
-    tone(1047, 0,    0.20, 0.55);
+    tone(1047, 0, 0.20, 0.55);
     tone(1319, 0.18, 0.15, 0.55);
   }
-
   function stop() {}
-
   return { init, start, stop };
 })();
 
 // ─────────────────────────────────────────────────────────────
-// RING para a CRIADORA — via <audio> WAV gerado em JS
+// RING para a CRIADORA
 // ─────────────────────────────────────────────────────────────
 const CriadoraRing = (() => {
   let el = null;
-
   function getEl() {
     if (el) return el;
-    const sampleRate = 44100;
-    const duration   = 0.8;
-    const freq       = 880;
+    const sampleRate = 44100, duration = 0.8, freq = 880;
     const numSamples = Math.floor(sampleRate * duration);
-    const buffer     = new ArrayBuffer(44 + numSamples * 2);
-    const view       = new DataView(buffer);
-
+    const buffer = new ArrayBuffer(44 + numSamples * 2);
+    const view = new DataView(buffer);
     function writeStr(offset, str) {
       for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
     }
-    writeStr(0,  'RIFF');
-    view.setUint32(4,  36 + numSamples * 2, true);
-    writeStr(8,  'WAVE');
-    writeStr(12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeStr(36, 'data');
-    view.setUint32(40, numSamples * 2, true);
-
+    writeStr(0, 'RIFF'); view.setUint32(4, 36 + numSamples * 2, true);
+    writeStr(8, 'WAVE'); writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    writeStr(36, 'data'); view.setUint32(40, numSamples * 2, true);
     for (let i = 0; i < numSamples; i++) {
-      const t        = i / sampleRate;
-      const fadeIn   = Math.min(1, t / (duration * 0.10));
-      const fadeOut  = Math.max(0, 1 - (t - duration * 0.7) / (duration * 0.3));
-      const envelope = fadeIn * fadeOut;
-      const sample   = Math.sin(2 * Math.PI * freq * t) * envelope * 0.25;
+      const t = i / sampleRate;
+      const env = Math.min(1, t / (duration * 0.10)) * Math.max(0, 1 - (t - duration * 0.7) / (duration * 0.3));
+      const sample = Math.sin(2 * Math.PI * freq * t) * env * 0.25;
       view.setInt16(44 + i * 2, Math.max(-32767, Math.min(32767, sample * 32767)), true);
     }
-
     const blob = new Blob([buffer], { type: 'audio/wav' });
     el = new Audio(URL.createObjectURL(blob));
-    el.loop   = true;
-    el.volume = 0.35;
+    el.loop = true; el.volume = 0.35;
     return el;
   }
-
-  function start() {
-    try { getEl().play().catch(() => {}); } catch {}
-  }
-
-  function stop() {
-    if (!el) return;
-    el.pause();
-    el.currentTime = 0;
-  }
-
+  function start() { try { getEl().play().catch(() => {}); } catch {} }
+  function stop() { if (!el) return; el.pause(); el.currentTime = 0; }
   return { start, stop };
 })();
 
 // ─────────────────────────────────────────────────────────────
-// Captura de midia: Full HD 16:9
-// ─────────────────────────────────────────────────────────────
 async function getMedia() {
   return navigator.mediaDevices.getUserMedia({
-    video: {
-      width:       { ideal: 1920 },
-      height:      { ideal: 1080 },
-      aspectRatio: { ideal: 16 / 9 },
-      frameRate:   { ideal: 30 },
-      facingMode:  'user'
-    },
-    audio: {
-      echoCancellation: true,
-      noiseSuppression: true
-    }
+    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, aspectRatio: { ideal: 16/9 }, frameRate: { ideal: 30 }, facingMode: 'user' },
+    audio: { echoCancellation: true, noiseSuppression: true }
   });
 }
 
 // ─────────────────────────────────────────────────────────────
 // Trickle ICE helpers
 // ─────────────────────────────────────────────────────────────
-
 let pendingCandidates = [];
 
 async function flushPendingCandidates(callId, role) {
-  for (const c of pendingCandidates) {
+  for (const c of pendingCandidates)
     await sb.from('ice_candidates').insert({ call_id: callId, role, candidate: JSON.stringify(c) });
-  }
   pendingCandidates = [];
 }
 
 async function sendIceCandidate(callId, role, candidate) {
   if (!candidate) return;
-  await sb.from('ice_candidates').insert({
-    call_id:   callId,
-    role:      role,
-    candidate: JSON.stringify(candidate)
-  });
+  await sb.from('ice_candidates').insert({ call_id: callId, role, candidate: JSON.stringify(candidate) });
 }
 
 function listenIceCandidates(callId, peerRole, pc, channelRef) {
   const ch = sb.channel('ice-' + callId + '-' + peerRole)
     .on('postgres_changes', {
-      event:  'INSERT',
-      schema: 'public',
-      table:  'ice_candidates',
-      filter: `call_id=eq.${callId}`
+      event: 'INSERT', schema: 'public', table: 'ice_candidates', filter: `call_id=eq.${callId}`
     }, async payload => {
       const row = payload.new;
       if (row.role !== peerRole) return;
       try {
         const cand = JSON.parse(row.candidate);
-        if (pc && pc.remoteDescription && cand && cand.candidate) {
+        if (pc && pc.remoteDescription && cand && cand.candidate)
           await pc.addIceCandidate(new RTCIceCandidate(cand));
-        }
       } catch (e) { console.warn('addIceCandidate:', e); }
     })
     .subscribe();
@@ -205,10 +141,7 @@ if (document.body.classList.contains('page-home')) {
   const endCallBtn    = document.getElementById('endCallBtn');
   const callStatusMsg = document.getElementById('callStatusMsg');
 
-  let localStream = null;
-  let pc          = null;
-  let callId      = null;
-  let channels    = [];
+  let localStream = null, pc = null, callId = null, channels = [];
 
   async function loadPerfil() {
     const { data } = await sb.from('perfil').select('nome,foto_url,status').eq('id',1).single();
@@ -220,17 +153,14 @@ if (document.body.classList.contains('page-home')) {
 
   function applyStatus(s) {
     const on = s === 'online';
-    statusDot.className     = 'status-dot '   + (on ? 'online'      : 'offline');
-    statusLabel.className   = 'status-label ' + (on ? 'online-text' : 'offline-text');
+    statusDot.className   = 'status-dot '   + (on ? 'online' : 'offline');
+    statusLabel.className = 'status-label ' + (on ? 'online-text' : 'offline-text');
     statusLabel.textContent = on ? 'Online agora' : 'Offline agora';
-    callBtn.disabled        = !on;
-    callHint.textContent    = on
-      ? 'Clique para iniciar a videochamada.'
-      : 'A criadora esta offline no momento.';
+    callBtn.disabled = !on;
+    callHint.textContent = on ? 'Clique para iniciar a videochamada.' : 'A criadora esta offline no momento.';
   }
 
   loadPerfil();
-
   sb.channel('perfil-public')
     .on('postgres_changes', { event:'UPDATE', schema:'public', table:'perfil', filter:'id=eq.1' },
       p => applyStatus(p.new.status))
@@ -239,7 +169,6 @@ if (document.body.classList.contains('page-home')) {
   callBtn.addEventListener('click', async () => {
     callBtn.disabled = true;
     Ring.init();
-
     try {
       localStream = await getMedia();
     } catch {
@@ -247,7 +176,6 @@ if (document.body.classList.contains('page-home')) {
       callBtn.disabled = false;
       return;
     }
-
     localVideo.srcObject = localStream;
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
@@ -262,24 +190,16 @@ if (document.body.classList.contains('page-home')) {
         callStatusMsg.textContent = 'Chamada em andamento';
       }
     };
-
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected')
-        callStatusMsg.textContent = 'Chamada em andamento';
-      if (pc.connectionState === 'failed') {
-        callStatusMsg.textContent = 'Falha na conexao. Tente novamente.';
-        setTimeout(endCall, 3000);
-      }
+      if (pc.connectionState === 'connected') callStatusMsg.textContent = 'Chamada em andamento';
+      if (pc.connectionState === 'failed') { callStatusMsg.textContent = 'Falha na conexao. Tente novamente.'; setTimeout(endCall, 3000); }
     };
 
     pendingCandidates = [];
     pc.onicecandidate = e => {
       if (!e.candidate) return;
-      if (callId) {
-        sendIceCandidate(callId, 'client', e.candidate);
-      } else {
-        pendingCandidates.push(e.candidate);
-      }
+      if (callId) sendIceCandidate(callId, 'client', e.candidate);
+      else pendingCandidates.push(e.candidate);
     };
 
     const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
@@ -289,11 +209,7 @@ if (document.body.classList.contains('page-home')) {
       .insert({ role: 'client', status: 'calling', offer: pc.localDescription.sdp })
       .select('id').single();
 
-    if (error || !row) {
-      alert('Erro ao iniciar chamada. Tente novamente.');
-      endCall();
-      return;
-    }
+    if (error || !row) { alert('Erro ao iniciar chamada. Tente novamente.'); endCall(); return; }
     callId = row.id;
 
     await flushPendingCandidates(callId, 'client');
@@ -305,15 +221,10 @@ if (document.body.classList.contains('page-home')) {
       }, async p => {
         const r = p.new;
         if (r.status === 'active' && r.answer && pc.signalingState === 'have-local-offer') {
-          try {
-            await pc.setRemoteDescription({ type: 'answer', sdp: r.answer });
-            callStatusMsg.textContent = 'Conectando video...';
-          } catch (e) { console.error('setRemoteDescription (cliente):', e); }
+          try { await pc.setRemoteDescription({ type: 'answer', sdp: r.answer }); callStatusMsg.textContent = 'Conectando video...'; }
+          catch (e) { console.error('setRemoteDescription (cliente):', e); }
         }
-        if (r.status === 'rejected') {
-          callStatusMsg.textContent = 'Chamada nao atendida.';
-          setTimeout(endCall, 2000);
-        }
+        if (r.status === 'rejected') { callStatusMsg.textContent = 'Chamada nao atendida.'; setTimeout(endCall, 2000); }
         if (r.status === 'ended') endCall();
       })
       .subscribe();
@@ -326,17 +237,14 @@ if (document.body.classList.contains('page-home')) {
   });
 
   function endCall() {
-    channels.forEach(ch => sb.removeChannel(ch));
-    channels = [];
+    channels.forEach(ch => sb.removeChannel(ch)); channels = [];
     pendingCandidates = [];
-    if (pc)          { pc.close(); pc = null; }
+    if (pc) { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
-    localVideo.srcObject  = null;
-    remoteVideo.srcObject = null;
+    localVideo.srcObject = null; remoteVideo.srcObject = null;
     callScreen.classList.add('hidden');
     callStatusMsg.textContent = 'Aguardando a criadora atender...';
-    callId = null;
-    callBtn.disabled = false;
+    callId = null; callBtn.disabled = false;
   }
 }
 
@@ -368,17 +276,9 @@ if (document.body.classList.contains('page-criadora')) {
   const endCallBtn      = document.getElementById('endCallBtn');
   const callStatusMsg   = document.getElementById('callStatusMsg');
 
-  let localStream    = null;
-  let pc             = null;
-  let callId         = null;
-  let incomingCallId = null;
-  let listenCh       = null;
-  let channels       = [];
+  let localStream = null, pc = null, callId = null, incomingCallId = null, listenCh = null, channels = [];
 
-  document.addEventListener('click', () => {
-    const tmp = new Audio();
-    tmp.play().catch(() => {});
-  }, { once: true });
+  document.addEventListener('click', () => { const tmp = new Audio(); tmp.play().catch(() => {}); }, { once: true });
 
   async function init() {
     const { data: { session } } = await sb.auth.getSession();
@@ -386,14 +286,11 @@ if (document.body.classList.contains('page-criadora')) {
   }
   init();
 
-  sb.auth.onAuthStateChange((_e, session) => {
-    if (session) showDashboard(); else showLogin();
-  });
+  sb.auth.onAuthStateChange((_e, session) => { if (session) showDashboard(); else showLogin(); });
 
   loginForm.addEventListener('submit', async e => {
     e.preventDefault();
-    loginBtn.disabled    = true;
-    loginBtn.textContent = 'Entrando...';
+    loginBtn.disabled = true; loginBtn.textContent = 'Entrando...';
     loginError.classList.add('hidden');
     const email = document.getElementById('loginEmail').value.trim();
     const pass  = document.getElementById('loginPassword').value;
@@ -401,15 +298,11 @@ if (document.body.classList.contains('page-criadora')) {
     if (error) {
       loginError.textContent = 'E-mail ou senha incorretos.';
       loginError.classList.remove('hidden');
-      loginBtn.disabled    = false;
-      loginBtn.textContent = 'Entrar';
+      loginBtn.disabled = false; loginBtn.textContent = 'Entrar';
     }
   });
 
-  logoutBtn.addEventListener('click', async () => {
-    await setStatus('offline');
-    await sb.auth.signOut();
-  });
+  logoutBtn.addEventListener('click', async () => { await setStatus('offline'); await sb.auth.signOut(); });
 
   function showLogin() {
     dashboardScreen.classList.add('hidden');
@@ -434,11 +327,9 @@ if (document.body.classList.contains('page-criadora')) {
 
   function applyStatusUI(s) {
     const on = s === 'online';
-    btnOnline.classList.toggle('active',  on);
+    btnOnline.classList.toggle('active', on);
     btnOffline.classList.toggle('active', !on);
-    statusFeedback.textContent = on
-      ? 'Voce esta online. Pode receber chamadas.'
-      : 'Voce esta offline. Clientes nao podem ligar.';
+    statusFeedback.textContent = on ? 'Voce esta online. Pode receber chamadas.' : 'Voce esta offline. Clientes nao podem ligar.';
   }
 
   async function setStatus(s) {
@@ -452,7 +343,7 @@ if (document.body.classList.contains('page-criadora')) {
   photoInput.addEventListener('change', async e => {
     const file = e.target.files[0];
     if (!file) return;
-    const ext  = file.name.split('.').pop();
+    const ext = file.name.split('.').pop();
     const path = `criadora/foto.${ext}`;
     const { error: upErr } = await sb.storage.from('fotos').upload(path, file, { upsert: true });
     if (upErr) { alert('Erro ao enviar foto.'); return; }
@@ -471,9 +362,21 @@ if (document.body.classList.contains('page-criadora')) {
     setTimeout(() => nameFeedback.classList.add('hidden'), 2000);
   });
 
+  // ✅ Cancela o toque/banner se o cliente desligar antes de atender
+  function cancelIncoming() {
+    CriadoraRing.stop();
+    incomingSection.classList.add('hidden');
+    incomingCallId = null;
+    // Fecha notificacao do SW se ainda estiver visivel
+    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({ type: 'CLOSE_NOTIFICATION' });
+    }
+  }
+
   function startListening() {
     if (listenCh) sb.removeChannel(listenCh);
     listenCh = sb.channel('criadora-incoming')
+      // Nova chamada chegando
       .on('postgres_changes', {
         event: 'INSERT', schema: 'public', table: 'sinalizacao'
       }, payload => {
@@ -482,10 +385,17 @@ if (document.body.classList.contains('page-criadora')) {
           incomingCallId = row.id;
           incomingSection.classList.remove('hidden');
           CriadoraRing.start();
-          // ✅ Avisa o Service Worker para disparar notificacao se app estiver em background
-          if (typeof window.notifyIncomingCall === 'function') {
-            window.notifyIncomingCall();
-          }
+          if (typeof window.notifyIncomingCall === 'function') window.notifyIncomingCall();
+        }
+      })
+      // ✅ Cliente cancelou/desligou antes de atender
+      .on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'sinalizacao'
+      }, payload => {
+        const row = payload.new;
+        // So nos importa a chamada que esta tocando (nao atendida ainda)
+        if (row.id === incomingCallId && (row.status === 'ended' || row.status === 'rejected')) {
+          cancelIncoming();
         }
       })
       .subscribe();
@@ -497,84 +407,59 @@ if (document.body.classList.contains('page-criadora')) {
     callId = incomingCallId;
     incomingCallId = null;
 
-    try {
-      localStream = await getMedia();
-    } catch {
+    try { localStream = await getMedia(); }
+    catch {
       alert('Autorize camera e microfone para atender.');
       await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', callId);
-      callId = null;
-      return;
+      callId = null; return;
     }
 
     localVideo.srcObject = localStream;
     callScreen.classList.remove('hidden');
     callStatusMsg.textContent = 'Conectando...';
 
-    const { data: sigRow } = await sb.from('sinalizacao')
-      .select('offer').eq('id', callId).single();
-
+    const { data: sigRow } = await sb.from('sinalizacao').select('offer').eq('id', callId).single();
     if (!sigRow || !sigRow.offer) {
       alert('Erro: oferta do cliente nao encontrada.');
       await sb.from('sinalizacao').update({ status: 'rejected' }).eq('id', callId);
-      endCall();
-      return;
+      endCall(); return;
     }
 
     pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
     pc.ontrack = e => {
-      if (e.streams && e.streams[0]) {
-        remoteVideo.srcObject = e.streams[0];
-        callStatusMsg.textContent = 'Chamada em andamento';
-      }
+      if (e.streams && e.streams[0]) { remoteVideo.srcObject = e.streams[0]; callStatusMsg.textContent = 'Chamada em andamento'; }
     };
-
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected')
-        callStatusMsg.textContent = 'Chamada em andamento';
-      if (pc.connectionState === 'failed') {
-        callStatusMsg.textContent = 'Falha na conexao.';
-        setTimeout(endCall, 3000);
-      }
+      if (pc.connectionState === 'connected') callStatusMsg.textContent = 'Chamada em andamento';
+      if (pc.connectionState === 'failed') { callStatusMsg.textContent = 'Falha na conexao.'; setTimeout(endCall, 3000); }
     };
 
-    pc.onicecandidate = e => {
-      if (e.candidate) sendIceCandidate(callId, 'criadora', e.candidate);
-    };
-
+    pc.onicecandidate = e => { if (e.candidate) sendIceCandidate(callId, 'criadora', e.candidate); };
     listenIceCandidates(callId, 'client', pc, channels);
 
     await pc.setRemoteDescription({ type: 'offer', sdp: sigRow.offer });
 
-    const { data: existing } = await sb.from('ice_candidates')
-      .select('candidate').eq('call_id', callId).eq('role', 'client');
+    const { data: existing } = await sb.from('ice_candidates').select('candidate').eq('call_id', callId).eq('role', 'client');
     if (existing) {
       for (const c of existing) {
         try {
           const cand = JSON.parse(c.candidate);
-          if (cand && cand.candidate)
-            await pc.addIceCandidate(new RTCIceCandidate(cand));
+          if (cand && cand.candidate) await pc.addIceCandidate(new RTCIceCandidate(cand));
         } catch {}
       }
     }
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-
-    await sb.from('sinalizacao').update({
-      answer: pc.localDescription.sdp,
-      status: 'active'
-    }).eq('id', callId);
-
+    await sb.from('sinalizacao').update({ answer: pc.localDescription.sdp, status: 'active' }).eq('id', callId);
     callStatusMsg.textContent = 'Chamada em andamento';
 
     const sigCh = sb.channel('criadora-sig-' + callId)
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public', table: 'sinalizacao', filter: `id=eq.${callId}`
-      }, p => {
-        if (p.new.status === 'ended') endCall();
-      })
+      }, p => { if (p.new.status === 'ended') endCall(); })
       .subscribe();
     channels.push(sigCh);
   });
@@ -595,12 +480,10 @@ if (document.body.classList.contains('page-criadora')) {
 
   function endCall() {
     CriadoraRing.stop();
-    channels.forEach(ch => sb.removeChannel(ch));
-    channels = [];
-    if (pc)          { pc.close(); pc = null; }
+    channels.forEach(ch => sb.removeChannel(ch)); channels = [];
+    if (pc) { pc.close(); pc = null; }
     if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
-    localVideo.srcObject  = null;
-    remoteVideo.srcObject = null;
+    localVideo.srcObject = null; remoteVideo.srcObject = null;
     callScreen.classList.add('hidden');
     callId = null;
   }
