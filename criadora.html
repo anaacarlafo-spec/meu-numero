@@ -12,16 +12,21 @@
 <body class="page-criadora">
 
   <!-- LOGIN -->
-  <div id="loginScreen" class="login-screen">
-    <div class="login-card">
-      <h1 class="login-title">Área da Criadora</h1>
-      <form id="loginForm" class="login-form">
-        <label for="loginEmail">E-mail</label>
-        <input id="loginEmail" type="email" autocomplete="email" required placeholder="seu@email.com">
-        <label for="loginPassword">Senha</label>
-        <input id="loginPassword" type="password" autocomplete="current-password" required placeholder="••••••••">
-        <p id="loginError" class="login-error hidden">E-mail ou senha incorretos.</p>
-        <button id="loginBtn" type="submit" class="btn-login">Entrar</button>
+  <div id="loginScreen" class="auth-screen">
+    <div class="auth-card">
+      <h1 class="auth-title">Área da Criadora</h1>
+      <p class="auth-subtitle">Acesso exclusivo</p>
+      <form id="loginForm" class="auth-form">
+        <div>
+          <label for="loginEmail" class="form-label">E-mail</label>
+          <input id="loginEmail" class="form-input" type="email" autocomplete="email" required placeholder="seu@email.com">
+        </div>
+        <div>
+          <label for="loginPassword" class="form-label">Senha</label>
+          <input id="loginPassword" class="form-input" type="password" autocomplete="current-password" required placeholder="••••••••">
+        </div>
+        <p id="loginError" class="form-error hidden">E-mail ou senha incorretos.</p>
+        <button id="loginBtn" type="submit" class="btn-primary">Entrar</button>
       </form>
     </div>
   </div>
@@ -30,46 +35,62 @@
   <div id="dashboardScreen" class="dashboard hidden">
 
     <header class="dash-header">
-      <span class="dash-title">Meu Número</span>
-      <button id="logoutBtn" class="btn-logout">Sair</button>
+      <span class="dash-logo">Meu Número</span>
+      <button id="logoutBtn" class="btn-ghost">Sair</button>
     </header>
 
-    <section class="dash-section">
-      <h2 class="dash-section-title">Foto de perfil</h2>
-      <div class="dash-photo-wrap">
-        <img id="dashPhoto" src="https://picsum.photos/seed/criadora/480/480" alt="Sua foto" width="120" height="120" class="dash-photo">
-        <label for="photoInput" class="btn-upload">Trocar foto</label>
-        <input id="photoInput" type="file" accept="image/*" class="sr-only">
-      </div>
-    </section>
+    <main class="dash-main">
 
-    <section class="dash-section">
-      <h2 class="dash-section-title">Seu nome</h2>
-      <div class="dash-name-row">
-        <input id="nameInput" type="text" class="input-name" placeholder="Seu nome">
-        <button id="saveNameBtn" class="btn-save">Salvar</button>
-      </div>
-      <p id="nameFeedback" class="feedback-msg hidden">Nome salvo!</p>
-    </section>
+      <section class="dash-section">
+        <h2 class="dash-section-title">Foto de perfil</h2>
+        <div class="photo-edit">
+          <img id="dashPhoto" src="https://picsum.photos/seed/criadora/480/480" alt="Sua foto" width="80" height="80" class="dash-photo">
+          <div class="photo-actions">
+            <label for="photoInput" class="btn-secondary" style="cursor:pointer;">Trocar foto</label>
+            <input id="photoInput" type="file" accept="image/*" class="sr-only">
+            <span class="photo-hint">JPG ou PNG até 2MB</span>
+          </div>
+        </div>
+      </section>
 
-    <section class="dash-section">
-      <h2 class="dash-section-title">Status</h2>
-      <div class="status-buttons">
-        <button id="btnOnline"  class="btn-status">Online</button>
-        <button id="btnOffline" class="btn-status active">Offline</button>
-      </div>
-      <p id="statusFeedback" class="feedback-msg">Você está offline. Clientes não podem ligar.</p>
-    </section>
+      <section class="dash-section">
+        <h2 class="dash-section-title">Seu nome</h2>
+        <div class="name-edit">
+          <input id="nameInput" type="text" class="form-input" placeholder="Seu nome">
+          <button id="saveNameBtn" class="btn-primary">Salvar</button>
+        </div>
+        <p id="nameFeedback" class="form-error hidden" style="color:#4ade80;">Nome salvo!</p>
+      </section>
 
-    <!-- Chamada entrante -->
-    <div id="incomingSection" class="incoming-section hidden">
-      <p class="incoming-msg">📞 Chamada entrante...</p>
-      <div class="incoming-buttons">
-        <button id="acceptCallBtn" class="btn-accept">Atender</button>
-        <button id="rejectCallBtn" class="btn-reject">Recusar</button>
-      </div>
-    </div>
+      <section class="dash-section">
+        <h2 class="dash-section-title">Status</h2>
+        <div class="status-toggle">
+          <button id="btnOnline"  class="btn-status" data-status="online">Online</button>
+          <button id="btnOffline" class="btn-status active" data-status="offline">Offline</button>
+        </div>
+        <p id="statusFeedback" class="status-feedback">Você está offline. Clientes não podem ligar.</p>
+      </section>
 
+      <!-- Chamada entrante -->
+      <div id="incomingSection" class="hidden">
+        <div class="incoming-banner">
+          <div class="incoming-banner-inner">
+            <div class="incoming-banner-info">
+              <span class="incoming-banner-icon">📞</span>
+              <div>
+                <p class="incoming-banner-title">Chamada entrante</p>
+                <p class="incoming-banner-sub">Um cliente quer falar com você</p>
+              </div>
+            </div>
+            <div class="incoming-banner-actions">
+              <button id="acceptCallBtn" class="btn-accept">Atender</button>
+              <button id="rejectCallBtn" class="btn-reject">Recusar</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </main>
   </div>
 
   <!-- Tela de chamada -->
