@@ -4,6 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Painel da Criadora — Meu Número</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#C9A84C">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Meu Número">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
@@ -39,7 +45,7 @@
       </div>
     </header>
 
-    <!-- Notificação de chamada recebida — banner fixo abaixo do cabeçalho -->
+    <!-- Banner de chamada recebida -->
     <div id="incomingSection" class="incoming-banner hidden" role="alert" aria-live="assertive">
       <div class="incoming-banner-inner">
         <div class="incoming-banner-info">
@@ -57,6 +63,12 @@
     </div>
 
     <main class="dash-main">
+
+      <!-- Banner de permissão de notificação -->
+      <div id="notifBanner" class="notif-banner hidden">
+        <p>🔔 Ative as notificações para receber chamadas mesmo com o app em segundo plano.</p>
+        <button id="notifBtn" class="btn-primary">Ativar notificações</button>
+      </div>
 
       <section class="dash-section">
         <h2 class="dash-section-title">Sua disponibilidade</h2>
@@ -110,5 +122,76 @@
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <script src="app.js"></script>
+
+  <script>
+    // ─── Service Worker + Notificações ───────────────────────────────
+    let swReg = null;
+
+    async function registerSW() {
+      if (!('serviceWorker' in navigator)) return;
+      try {
+        swReg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+        await navigator.serviceWorker.ready;
+      } catch (e) { console.warn('SW registro falhou:', e); }
+    }
+    registerSW();
+
+    // Mostra banner se notificações não foram concedidas
+    const notifBanner = document.getElementById('notifBanner');
+    const notifBtn    = document.getElementById('notifBtn');
+
+    function checkNotifPermission() {
+      if (!('Notification' in window)) return;
+      if (Notification.permission === 'default') {
+        notifBanner.classList.remove('hidden');
+      } else {
+        notifBanner.classList.add('hidden');
+      }
+    }
+
+    // Só mostra o banner após o login (o dashboard ficar visível)
+    const dashObserver = new MutationObserver(() => {
+      const dash = document.getElementById('dashboardScreen');
+      if (dash && !dash.classList.contains('hidden')) {
+        checkNotifPermission();
+        dashObserver.disconnect();
+      }
+    });
+    const dash = document.getElementById('dashboardScreen');
+    if (dash) dashObserver.observe(dash, { attributes: true, attributeFilter: ['class'] });
+
+    notifBtn.addEventListener('click', async () => {
+      const result = await Notification.requestPermission();
+      if (result === 'granted') {
+        notifBanner.classList.add('hidden');
+      } else {
+        notifBtn.textContent = 'Permissão negada no navegador';
+        notifBtn.disabled = true;
+      }
+    });
+
+    // Expõe função global para o app.js avisar o SW de chamada recebida
+    window.notifyIncomingCall = function () {
+      // 1. Se o app está visível, o som já toca normalmente
+      if (document.visibilityState === 'visible') return;
+
+      // 2. Se está em background, avisa via SW (postMessage)
+      if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'INCOMING_CALL' });
+        return;
+      }
+
+      // 3. Fallback: Notification API direta
+      if (Notification.permission === 'granted') {
+        new Notification('📞 Chamada recebida', {
+          body: 'Um cliente está ligando para você!',
+          icon: '/icon-192.png',
+          tag:  'incoming-call',
+          renotify: true,
+          requireInteraction: true
+        });
+      }
+    };
+  </script>
 </body>
 </html>
